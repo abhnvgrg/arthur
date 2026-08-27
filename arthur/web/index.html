@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ARTHUR</title>
+<style>
+  :root {
+    --bg: #0e1117; --panel: #161b22; --line: #263141; --ink: #e6edf3;
+    --muted: #8b949e; --accent: #4c8eff; --ok: #3fb950; --warn: #d29922;
+    --danger: #f85149; --radius: 10px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f8fa; --panel: #ffffff; --line: #d7dee6; --ink: #1f2328;
+      --muted: #5a6570;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    height: 100vh; display: grid; grid-template-columns: 250px 1fr 300px;
+  }
+  aside, main, section.side { min-height: 0; display: flex; flex-direction: column; }
+  aside { border-right: 1px solid var(--line); background: var(--panel); }
+  section.side { border-left: 1px solid var(--line); background: var(--panel); }
+  header {
+    padding: 14px 16px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  h1 { font-size: 15px; margin: 0; letter-spacing: .12em; text-transform: uppercase; }
+  h2 { font-size: 12px; margin: 0; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .scroll { overflow-y: auto; flex: 1; padding: 12px; }
+  button {
+    font: inherit; color: var(--ink); background: transparent;
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.ok { border-color: var(--ok); color: var(--ok); }
+  button.no { border-color: var(--danger); color: var(--danger); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .session {
+    padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 14px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .session:hover { background: rgba(127,127,127,.12); }
+  .session.active { background: rgba(76,142,255,.18); color: var(--accent); }
+  .msg { margin-bottom: 14px; display: flex; gap: 10px; }
+  .who {
+    flex: 0 0 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
+    font-size: 11px; font-weight: 600; border: 1px solid var(--line);
+  }
+  .msg.user .who { background: rgba(76,142,255,.2); }
+  .bubble { flex: 1; white-space: pre-wrap; word-break: break-word; padding-top: 4px; }
+  .tool {
+    font-size: 12.5px; border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 10px; margin: 6px 0; background: rgba(127,127,127,.07);
+    display: flex; gap: 8px; align-items: baseline;
+  }
+  .tool .name { font-family: ui-monospace, monospace; }
+  .tool .outcome { margin-left: auto; font-size: 11px; color: var(--muted); }
+  .tool.ok { border-left: 3px solid var(--ok); }
+  .tool.bad { border-left: 3px solid var(--danger); }
+  .tool.wait { border-left: 3px solid var(--warn); }
+  .tool[data-call="reflection"] .name, .tool[data-call="critique"] .name { font-style: italic; }
+  .approval {
+    border: 1px solid var(--warn); border-radius: var(--radius);
+    padding: 12px; margin: 10px 0; background: rgba(210,153,34,.08);
+  }
+  .approval pre {
+    margin: 8px 0; font-size: 12px; overflow-x: auto; color: var(--muted);
+    font-family: ui-monospace, monospace;
+  }
+  .composer { border-top: 1px solid var(--line); padding: 12px; display: flex; gap: 8px; }
+  textarea {
+    flex: 1; resize: none; background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px;
+    font: inherit; min-height: 42px; max-height: 160px;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  .toolrow { padding: 7px 8px; border-radius: 8px; font-size: 13px; }
+  .toolrow:hover { background: rgba(127,127,127,.1); }
+  .toolrow .n { font-family: ui-monospace, monospace; }
+  .pill {
+    font-size: 10px; padding: 1px 6px; border-radius: 999px; margin-left: 6px;
+    border: 1px solid var(--line); color: var(--muted); text-transform: uppercase;
+  }
+  .pill.writes { border-color: var(--warn); color: var(--warn); }
+  .pill.irreversible { border-color: var(--danger); color: var(--danger); }
+  .muted { color: var(--muted); font-size: 13px; }
+  .status { font-size: 12px; color: var(--muted); padding: 0 12px 10px; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); margin-right: 5px; }
+  .dot.live { background: var(--ok); }
+  @media (max-width: 1000px) { body { grid-template-columns: 1fr; } aside, section.side { display: none; } }
+</style>
+</head>
+<body>
+
+<aside>
+  <header><h1>Arthur</h1><button id="new">New</button></header>
+  <div class="scroll" id="sessions"></div>
+  <div class="status"><span class="dot" id="dot"></span><span id="conn">offline</span></div>
+</aside>
+
+<main>
+  <header>
+    <h2 id="title">New conversation</h2>
+    <label class="muted"><input type="checkbox" id="risky" checked /> offer risky tools</label>
+  </header>
+  <div class="scroll" id="log"></div>
+  <div class="composer">
+    <textarea id="input" placeholder="Ask something, or tell me to do something..." rows="1"></textarea>
+    <button class="primary" id="send">Send</button>
+  </div>
+</main>
+
+<section class="side">
+  <header><h2>Tools</h2><span class="muted" id="count"></span></header>
+  <div class="scroll" id="tools"></div>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const TOKEN = "__ARTHUR_TOKEN__";
+let sessionId = null, stream = null, busy = false;
+
+function authHeaders(extra) {
+  const headers = Object.assign({}, extra || {});
+  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+  return headers;
+}
+
+function api(path, options) {
+  const settings = Object.assign({}, options || {});
+  settings.headers = authHeaders(settings.headers);
+  return fetch(path, settings);
+}
+
+function streamUrl(path) {
+  return TOKEN ? `${path}?token=${encodeURIComponent(TOKEN)}` : path;
+}
+
+const escape = (s) => String(s ?? "").replace(/[&<>]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
+
+function scroll() { $("log").scrollTop = $("log").scrollHeight; }
+
+function addMessage(role, text) {
+  const el = document.createElement("div");
+  el.className = "msg " + role;
+  el.innerHTML = `<div class="who">${role === "user" ? "You" : "J"}</div>
+                  <div class="bubble">${escape(text)}</div>`;
+  $("log").appendChild(el);
+  scroll();
+  return el.querySelector(".bubble");
+}
+
+function addTool(callId, name, state, detail) {
+  let el = document.querySelector(`[data-call="${callId}"]`);
+  if (!el) {
+    el = document.createElement("div");
+    el.dataset.call = callId;
+    $("log").appendChild(el);
+  }
+  el.className = "tool " + state;
+  el.innerHTML = `<span class="name">${escape(name)}</span>
+                  <span class="muted">${escape(detail || "")}</span>`;
+  scroll();
+  return el;
+}
+
+function addApproval(data) {
+  const el = document.createElement("div");
+  el.className = "approval";
+  el.dataset.approval = data.call_id;
+  el.innerHTML = `
+    <div><strong>${escape(data.tool)}</strong> is <strong>${escape(data.risk)}</strong> and needs your approval.</div>
+    <pre>${escape(JSON.stringify(data.arguments, null, 2))}</pre>
+    <div style="display:flex;gap:8px">
+      <button class="ok">Allow</button>
+      <button class="no">Deny</button>
+    </div>`;
+  $("log").appendChild(el);
+  scroll();
+
+  const decide = async (approved) => {
+    el.querySelectorAll("button").forEach(b => b.disabled = true);
+    await api("/api/approvals", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ call_id: data.call_id, approved })
+    }).catch(() => {});
+    el.innerHTML = `<div class="muted">${approved ? "Allowed" : "Denied"} — ${escape(data.tool)}</div>`;
+  };
+  el.querySelector(".ok").onclick = () => decide(true);
+  el.querySelector(".no").onclick = () => decide(false);
+}
+
+function connect(id) {
+  if (stream) stream.close();
+  stream = new EventSource(streamUrl(`/api/events/${id}`));
+
+  stream.onopen = () => { $("dot").className = "dot live"; $("conn").textContent = "live"; };
+  stream.onerror = () => { $("dot").className = "dot"; $("conn").textContent = "reconnecting"; };
+
+  const on = (type, handler) => stream.addEventListener(type, e => handler(JSON.parse(e.data).data));
+
+  on("thinking", d => addTool("thinking", "thinking", "wait", `step ${d.step}`));
+  on("tool_proposed", d => addTool(d.call_id, d.tool, "wait", "proposed"));
+  on("approval_required", d => addApproval(d));
+  on("approval_granted", d => addTool(d.call_id, d.tool, "wait", "approved, running"));
+  on("approval_denied", d => addTool(d.call_id, d.tool, "bad", "denied"));
+  on("tool_finished", d => addTool(
+    d.call_id, d.tool, d.outcome === "ok" ? "ok" : "bad",
+    d.outcome === "ok" ? `${d.duration_ms ?? 0} ms` : (d.error || d.outcome)
+  ));
+  on("reflection", d => {
+    if (d.passed) {
+      if (d.attempt > 0) addTool("reflection", "reflection", "ok", "answer corrected");
+      return;
+    }
+    const detail = (d.issues || []).map(i => i.kind).join(", ");
+    addTool("reflection", "reflection", "wait", `rechecking: ${detail}`);
+  });
+  on("error", d => addMessage("assistant", "Error: " + d.error));
+}
+
+async function loadTools() {
+  const data = await api("/api/tools").then(r => r.json()).catch(() => null);
+  if (!data) return;
+  $("count").textContent = data.count + " available";
+  $("tools").innerHTML = data.tools.map(t => `
+    <div class="toolrow">
+      <span class="n">${escape(t.name)}</span>
+      ${t.risk === "read_only" ? "" : `<span class="pill ${t.risk}">${escape(t.risk_label)}</span>`}
+      <div class="muted">${escape(t.description)}</div>
+    </div>`).join("");
+}
+
+async function loadSessions() {
+  const data = await api("/api/sessions").then(r => r.json()).catch(() => ({ sessions: [] }));
+  $("sessions").innerHTML = data.sessions.map(s => `
+    <div class="session ${s.id === sessionId ? "active" : ""}" data-id="${s.id}">
+      ${escape(s.title)}
+    </div>`).join("") || `<div class="muted">No conversations yet.</div>`;
+
+  $("sessions").querySelectorAll(".session").forEach(el => {
+    el.onclick = () => openSession(el.dataset.id);
+  });
+}
+
+async function openSession(id) {
+  sessionId = id;
+  const data = await api(`/api/sessions/${id}`).then(r => r.json());
+  $("title").textContent = data.title;
+  $("log").innerHTML = "";
+  for (const m of data.messages) {
+    if (m.role === "user") addMessage("user", m.content);
+    else if (m.role === "assistant" && m.content) addMessage("assistant", m.content);
+  }
+  connect(id);
+  loadSessions();
+}
+
+async function newSession() {
+  const data = await api("/api/sessions", { method: "POST" }).then(r => r.json());
+  await openSession(data.id);
+}
+
+async function send() {
+  const text = $("input").value.trim();
+  if (!text || busy) return;
+
+  if (!sessionId) await newSession();
+  busy = true;
+  $("send").disabled = true;
+  $("input").value = "";
+  addMessage("user", text);
+
+  try {
+    const response = await api("/api/chat", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: text, session_id: sessionId, expose_risky: $("risky").checked
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      addMessage("assistant", "Error: " + (data.detail || response.statusText));
+    } else {
+      addMessage("assistant", data.answer || "(no answer)");
+      if (data.stopped_at_limit) addMessage("assistant", "(stopped at the step limit)");
+      if (data.critique && !data.critique.passed) {
+        const kinds = data.critique.issues.map(i => i.kind).join(", ");
+        addTool("critique", "unresolved", "bad", `self-check still failing: ${kinds}`);
+      }
+      $("title").textContent = data.title || $("title").textContent;
+      loadSessions();
+    }
+  } catch (error) {
+    addMessage("assistant", "Error: " + error.message);
+  } finally {
+    busy = false;
+    $("send").disabled = false;
+    $("input").focus();
+  }
+}
+
+$("send").onclick = send;
+$("new").onclick = newSession;
+$("input").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$("input").addEventListener("input", e => {
+  e.target.style.height = "auto";
+  e.target.style.height = Math.min(e.target.scrollHeight, 160) + "px";
+});
+
+loadTools();
+loadSessions().then(() => { if (!sessionId) newSession(); });
+</script>
+</body>
+</html>

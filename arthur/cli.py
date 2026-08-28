@@ -8,6 +8,7 @@ import sys
 from arthur.audit import AuditLog
 from arthur.dispatch import Dispatcher, Outcome
 from arthur.llm import LLMError, OpenAILLM
+from arthur.reflection import critic_from_environment
 from arthur.selection import run_turn
 from arthur.tools.builtins import build_registry
 from arthur.tools.registry import Risk
@@ -81,13 +82,15 @@ def approve_at_prompt(spec, arguments) -> bool:
 
 
 async def chat(dispatcher: Dispatcher, message: str, history: list) -> list:
+    llm = OpenAILLM()
     try:
         turn = await run_turn(
-            OpenAILLM(),
+            llm,
             dispatcher,
             message,
             history=history,
             approve=approve_at_prompt,
+            critic=critic_from_environment(llm),
         )
     except LLMError as error:
         print(f"  {error}")

@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable, Sequence
 from arthur.dispatch import Dispatcher, Outcome, ToolResult
 from arthur.events import Emitter, EventBus, EventType
 from arthur.llm import LLM, Completion, ToolCall
-from arthur.reflection import MAX_REFLECTIONS, Critique, critique
+from arthur.reflection import MAX_REFLECTIONS, Critic, Critique, critique
 from arthur.tools.registry import ToolSpec
 
 MAX_STEPS = 4
@@ -237,6 +237,8 @@ async def run_turn(
     max_parallel: int = MAX_PARALLEL_TOOLS,
     reflect: bool = True,
     max_reflections: int = MAX_REFLECTIONS,
+    critic: Critic | None = None,
+    stream: bool = True,
 ) -> Turn:
     if max_steps < 1:
         raise ValueError("max_steps must be at least 1")
@@ -244,6 +246,7 @@ async def run_turn(
         raise ValueError("max_reflections cannot be negative")
 
     emit = Emitter(bus, session_id) if bus is not None else None
+    stream_from = getattr(llm, "stream", None) if stream and bus is not None else None
     messages = build_messages(user_message, history)
     tools = dispatcher.registry.openai_tools(include_risky=expose_risky)
     steps: list[Step] = []
@@ -259,7 +262,15 @@ async def run_turn(
     try:
         for remaining in range(max_steps, 0, -1):
             await announce(EventType.THINKING, step=len(steps) + 1)
-            completion = await llm.complete(messages, tools)
+
+            if stream_from is not None:
+
+                async def on_delta(text: str) -> None:
+                    await announce(EventType.ANSWER_DELTA, text=text)
+
+                completion = await stream_from(messages, tools, on_delta)
+            else:
+                completion = await llm.complete(messages, tools)
             step = Step(completion=completion)
             steps.append(step)
 
@@ -271,6 +282,14 @@ async def run_turn(
 
                 if (
                     verdict is not None
+                    and verdict.passed
+                    and critic is not None
+                    and completion.text
+                ):
+                    verdict = await critic.review(completion.text, results)
+
+                if (
+                    verdict is not None
                     and not verdict.passed
                     and reflections < max_reflections
                     and remaining > 1
@@ -279,6 +298,7 @@ async def run_turn(
                     await announce(
                         EventType.REFLECTION,
                         passed=False,
+                        source=verdict.source,
                         issues=[issue.to_dict() for issue in verdict.issues],
                         attempt=reflections,
                     )
@@ -289,6 +309,7 @@ async def run_turn(
                     await announce(
                         EventType.REFLECTION,
                         passed=verdict.passed,
+                        source=verdict.source,
                         issues=[issue.to_dict() for issue in verdict.issues],
                         attempt=reflections,
                     )

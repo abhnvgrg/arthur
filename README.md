@@ -8,7 +8,7 @@ synthesis, and reflection.
 That engine reads. This project is about letting it **act**, safely.
 
 ```
-362 tests passing — no API key, no network, no Docker
+433 tests passing — no API key, no network, no Docker
 ```
 
 ## What it does
@@ -20,14 +20,18 @@ That engine reads. This project is about letting it **act**, safely.
   Research Assistant's retrieval graph.
 - **Asks before it acts** — anything that writes or destroys waits for your
   approval, in the terminal or in the browser.
-- **Shows its work** — live events for every step, tool call, and decision.
+- **Shows its work** — live events for every step, tool call, and decision,
+  and the answer itself as it is written.
 - **Remembers conversations** — persistent sessions with history trimming.
 - **Logs everything** — a hash-chained audit of every attempt, including the
   refused ones.
-- **Requires a token** — every endpoint, minted on first run and printed at
-  startup.
+- **Knows who is asking** — named, scoped, revocable API tokens, stored as
+  hashes and rate limited per caller. A token that can watch cannot approve.
 - **Checks its own answer** — a turn that claims success for something that
-  did not happen is sent back for a rewrite.
+  did not happen is sent back for a rewrite. Deterministic by default; a model
+  critic can be switched on for what patterns cannot see.
+- **Survives a bad minute** — model calls retry transient failures with
+  jittered backoff, and never retry a request that was simply wrong.
 
 ## Run it
 
@@ -39,8 +43,10 @@ python -m venv .venv
 .venv/Scripts/python -m arthur            # terminal REPL
 ```
 
-The server prints its API token at startup and the web UI receives it
-automatically. Set `ARTHUR_API_TOKEN` to supply your own.
+On first run the server prints the owner token **once** — save it, because
+only its hash is kept. Paste it into the web UI when it asks; it is remembered
+in `localStorage` after that. `ARTHUR_API_TOKEN` supplies your own instead and
+is never written to disk.
 
 The web UI needs `OPENAI_API_KEY`. The terminal REPL can drive tools directly
 without one:
@@ -92,7 +98,7 @@ something it just read. So the boundary between "the model suggested this" and
 | `arthur/session.py` | Conversations, persistence, history trimming |
 | `arthur/server.py` | HTTP API, SSE, approval broker |
 | `arthur/web/index.html` | Web UI, no build step |
-| `arthur/security.py` | API token, constant-time check, bind warning |
+| `arthur/security.py` | Principals, scopes, hashed tokens, stream tickets, rate limits |
 | `arthur/cli.py` | Terminal REPL |
 | `arthur/tools/` | tasks · files · convert · memory · time · calculator · research |
 
@@ -135,10 +141,15 @@ Mutation-checked, not just green:
 | Variable | Default |
 |---|---|
 | `OPENAI_API_KEY` | — (required for chat) |
-| `ARTHUR_API_TOKEN` | generated on first run |
+| `ARTHUR_API_TOKEN` | unset — an all-scope token, never stored |
 | `ARTHUR_CONFIG_FILE` | `~/.arthur/config.json` |
 | `ARTHUR_HOST` / `ARTHUR_PORT` | `127.0.0.1` / `8765` |
 | `ARTHUR_APPROVAL_TIMEOUT` | `120` seconds |
+| `ARTHUR_RATE_LIMIT` / `ARTHUR_CHAT_RATE_LIMIT` | `120` / `20` per window |
+| `ARTHUR_RATE_WINDOW` | `60` seconds |
+| `ARTHUR_LLM_ATTEMPTS` | `3` |
+| `ARTHUR_LLM_BACKOFF` / `ARTHUR_LLM_BACKOFF_CAP` | `0.5` / `8` seconds |
+| `ARTHUR_LLM_CRITIC` | unset — set to `1` for the model critic (a call per turn) |
 | `ARTHUR_AUDIT_LOG` | `~/.arthur/audit.jsonl` |
 | `ARTHUR_MEMORY_FILE` | `~/.arthur/memory.json` |
 | `ARTHUR_TASKS_FILE` | `~/.arthur/tasks.json` |
@@ -148,8 +159,13 @@ Mutation-checked, not just green:
 
 ## Not done yet
 
-The API uses **one shared token with no user identity**, so anyone holding it
-can approve destructive calls; there is no scope and no rate limiting. Answers
-are not streamed token by token. Reflection is heuristic and English-only. No
-tool reaches the network. Each
-document's *Known limits* section is specific about its own layer.
+Scopes are coarse — `read` sees every conversation and the whole audit log,
+and nothing records *which* principal approved a call in the hash chain.
+Sessions, tickets, and rate-limit counters live in one process's memory, so a
+second worker would break all three. Answers are not streamed token by token.
+Reflection's default layer is heuristic and English-only, and its optional
+model critic is a model grading a model — untested against a real provider. A
+streamed answer that the self-check then rejects has already been seen; the UI
+withdraws it and streams the rewrite. Only `research` reaches the network,
+and only when configured. Each document's *Known limits* section is specific
+about its own layer.

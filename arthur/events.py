@@ -16,6 +16,7 @@ class EventType:
     TOOL_STARTED = "tool_started"
     TOOL_FINISHED = "tool_finished"
     REFLECTION = "reflection"
+    ANSWER_DELTA = "answer_delta"
     ANSWER = "answer"
     TURN_FINISHED = "turn_finished"
     ERROR = "error"

@@ -277,3 +277,185 @@ async def test_the_reflection_event_is_emitted(dispatcher):
     assert len(reflections) == 2
     assert reflections[0].data["passed"] is False
     assert reflections[-1].data["passed"] is True
+
+
+from arthur.llm import LLMError
+from arthur.reflection import (
+    MODEL,
+    RULES,
+    Critique,
+    Issue,
+    LLMCritic,
+    critic_from_environment,
+    describe,
+    parse_verdict,
+)
+
+
+class Critic:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.seen = []
+
+    async def complete(self, messages, tools):
+        self.seen.append(messages)
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return Completion(text=reply)
+
+
+class Always:
+    def __init__(self, critique):
+        self.critique = critique
+        self.seen = []
+
+    @property
+    def calls(self):
+        return len(self.seen)
+
+    async def review(self, answer, results):
+        self.seen.append(answer)
+        return self.critique
+
+
+async def test_a_clean_verdict_passes():
+    verdict = parse_verdict('{"passed": true}')
+
+    assert verdict.passed is True
+    assert verdict.source == MODEL
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [None, "", "not json at all", "{unclosed", '{"passed": "maybe"}', "[]"],
+)
+async def test_an_unreadable_verdict_cannot_fail_a_turn(raw):
+    assert parse_verdict(raw).passed is True
+
+
+async def test_a_fenced_verdict_is_still_read():
+    raw = '```json\n{"passed": false, "issues": [{"kind": "fabricated_detail", "detail": "It invented a filename."}]}\n```'
+
+    verdict = parse_verdict(raw)
+
+    assert verdict.passed is False
+    assert verdict.issues[0].kind == IssueKind.FABRICATED_DETAIL
+
+
+async def test_an_unknown_kind_is_kept_but_relabelled():
+    raw = '{"passed": false, "issues": [{"kind": "vibes", "detail": "It felt wrong."}]}'
+
+    verdict = parse_verdict(raw)
+
+    assert verdict.passed is False
+    assert verdict.issues[0].kind == IssueKind.MODEL_FLAGGED
+    assert verdict.issues[0].detail == "It felt wrong."
+
+
+async def test_issues_without_a_detail_are_dropped_and_a_failure_becomes_a_pass():
+    raw = '{"passed": false, "issues": [{"kind": "fabricated_detail", "detail": "  "}]}'
+
+    assert parse_verdict(raw).passed is True
+
+
+async def test_the_number_of_reported_issues_is_capped():
+    entries = ", ".join(
+        '{"kind": "fabricated_detail", "detail": "issue %d"}' % n for n in range(8)
+    )
+    raw = '{"passed": false, "issues": [%s]}' % entries
+
+    assert len(parse_verdict(raw).issues) == 3
+
+
+async def test_the_tool_record_names_every_call_and_truncates_a_long_value():
+    long_value = "x" * 900
+    record = describe([ok(), ToolResult(tool="read_file", outcome="ok", value=long_value)])
+
+    assert "read_file" in record
+    assert "truncated" in record
+    assert long_value not in record
+
+
+async def test_an_empty_tool_record_says_so():
+    assert describe([]) == "No tools were called."
+
+
+async def test_the_critic_sends_the_answer_and_the_record():
+    llm = Critic(['{"passed": true}'])
+
+    verdict = await LLMCritic(llm).review("All set.", [refused()])
+
+    assert verdict.passed is True
+    prompt = llm.seen[0][1]["content"]
+    assert "All set." in prompt
+    assert "remember" in prompt
+
+
+async def test_a_critic_that_fails_does_not_fail_the_turn():
+    llm = Critic([LLMError("provider is down")])
+
+    verdict = await LLMCritic(llm).review("All set.", [])
+
+    assert verdict.passed is True
+    assert verdict.source == MODEL
+
+
+async def test_the_critic_runs_only_when_the_rules_already_passed(dispatcher):
+    critic = Always(Critique(passed=True, source=MODEL))
+    llm = ScriptedLLM([Completion(text="Delhi is the capital.")])
+
+    await run_turn(llm, dispatcher, "capital of India", critic=critic)
+
+    assert critic.calls == 1
+
+
+async def test_an_answer_the_rules_rejected_is_never_sent_to_the_critic(dispatcher):
+    critic = Always(Critique(passed=True, source=MODEL))
+    llm = ScriptedLLM(
+        [
+            Completion(tool_calls=(ToolCall(id="c1", name="forget", arguments={"key": "k"}),)),
+            Completion(text="Deleted it."),
+            Completion(text="It was not deleted; the call was refused."),
+        ]
+    )
+
+    await run_turn(llm, dispatcher, "forget k", approve=lambda *a, **k: False, critic=critic)
+
+    assert "Deleted it." not in critic.seen
+    assert critic.seen == ["It was not deleted; the call was refused."]
+
+
+async def test_a_critic_failure_sends_the_answer_back_for_a_rewrite(dispatcher):
+    critic = Always(
+        Critique(
+            passed=False,
+            issues=(Issue(IssueKind.FABRICATED_DETAIL, "You invented a filename."),),
+            source=MODEL,
+        )
+    )
+    llm = ScriptedLLM(
+        [Completion(text="I read notes.txt."), Completion(text="I did not read any file.")]
+    )
+
+    turn = await run_turn(llm, dispatcher, "read something", critic=critic)
+
+    assert turn.answer == "I did not read any file."
+    assert critic.calls == 2
+
+
+async def test_the_critic_is_off_unless_the_environment_asks_for_it(monkeypatch):
+    llm = ScriptedLLM([])
+
+    monkeypatch.delenv("ARTHUR_LLM_CRITIC", raising=False)
+    assert critic_from_environment(llm) is None
+
+    monkeypatch.setenv("ARTHUR_LLM_CRITIC", "0")
+    assert critic_from_environment(llm) is None
+
+    monkeypatch.setenv("ARTHUR_LLM_CRITIC", "true")
+    assert isinstance(critic_from_environment(llm), LLMCritic)
+
+
+async def test_a_rules_critique_says_where_it_came_from():
+    assert critique("All good.", [ok()]).source == RULES

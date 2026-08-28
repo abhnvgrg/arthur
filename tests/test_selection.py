@@ -297,3 +297,97 @@ async def test_an_approved_call_is_audited_twice(dispatcher, audit):
 
     outcomes = [entry["outcome"] for entry in audit.entries()]
     assert outcomes == [Outcome.CONFIRMATION_REQUIRED, Outcome.OK]
+
+
+from arthur.events import EventBus, EventType
+
+
+class StreamingScriptedLLM(ScriptedLLM):
+    """A scripted model that also delivers its answer a word at a time."""
+
+    def __init__(self, script):
+        super().__init__(script)
+        self.streamed = 0
+
+    async def stream(self, messages, tools, on_delta):
+        self.streamed += 1
+        completion = await self.complete(messages, tools)
+        for word in (completion.text or "").split(" "):
+            await on_delta(word + " ")
+        return completion
+
+
+def texts(bus, session_id, event_type):
+    return [
+        event.data
+        for event in bus.history(session_id)
+        if event.type == event_type
+    ]
+
+
+async def test_an_answer_is_streamed_as_deltas_when_the_model_can(dispatcher):
+    bus = EventBus()
+    llm = StreamingScriptedLLM([Completion(text="Delhi is the capital.")])
+
+    turn = await run_turn(llm, dispatcher, "capital", bus=bus, session_id="s1")
+
+    deltas = [entry["text"] for entry in texts(bus, "s1", EventType.ANSWER_DELTA)]
+    assert "".join(deltas).strip() == "Delhi is the capital."
+    assert turn.answer == "Delhi is the capital."
+    assert llm.streamed == 1
+
+
+async def test_nothing_streams_without_a_bus_to_stream_to(dispatcher):
+    llm = StreamingScriptedLLM([Completion(text="Delhi is the capital.")])
+
+    turn = await run_turn(llm, dispatcher, "capital")
+
+    assert turn.answer == "Delhi is the capital."
+    assert llm.streamed == 0
+
+
+async def test_streaming_can_be_turned_off(dispatcher):
+    bus = EventBus()
+    llm = StreamingScriptedLLM([Completion(text="Delhi is the capital.")])
+
+    await run_turn(llm, dispatcher, "capital", bus=bus, session_id="s1", stream=False)
+
+    assert llm.streamed == 0
+    assert texts(bus, "s1", EventType.ANSWER_DELTA) == []
+
+
+async def test_a_model_that_cannot_stream_still_runs(dispatcher):
+    bus = EventBus()
+    llm = ScriptedLLM([Completion(text="Delhi is the capital.")])
+
+    turn = await run_turn(llm, dispatcher, "capital", bus=bus, session_id="s1")
+
+    assert turn.answer == "Delhi is the capital."
+    assert texts(bus, "s1", EventType.ANSWER_DELTA) == []
+
+
+async def test_a_rewritten_answer_streams_twice(dispatcher):
+    bus = EventBus()
+    llm = StreamingScriptedLLM(
+        [
+            Completion(tool_calls=(ToolCall(id="c1", name="forget", arguments={"key": "k"}),)),
+            Completion(text="Deleted it."),
+            Completion(text="It was refused, so nothing was deleted."),
+        ]
+    )
+
+    turn = await run_turn(
+        llm,
+        dispatcher,
+        "forget k",
+        approve=lambda *a, **k: False,
+        bus=bus,
+        session_id="s1",
+    )
+
+    joined = "".join(
+        entry["text"] for entry in texts(bus, "s1", EventType.ANSWER_DELTA)
+    )
+    assert "Deleted it." in joined
+    assert turn.answer == "It was refused, so nothing was deleted."
+    assert turn.reflections == 1

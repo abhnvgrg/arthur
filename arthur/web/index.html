@@ -123,23 +123,66 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const TOKEN = "__ARTHUR_TOKEN__";
-let sessionId = null, stream = null, busy = false;
+const AUTH_MODE = "__ARTHUR_AUTH__";
+const TOKEN_KEY = "arthur.token";
+let sessionId = null, stream = null, busy = false, live = null;
+
+function storedToken() {
+  if (AUTH_MODE !== "required") return "";
+  try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+}
+
+function rememberToken(value) {
+  try { localStorage.setItem(TOKEN_KEY, value); } catch (e) {}
+}
+
+function forgetToken() {
+  try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+}
 
 function authHeaders(extra) {
   const headers = Object.assign({}, extra || {});
-  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+  const token = storedToken();
+  if (token) headers["Authorization"] = "Bearer " + token;
   return headers;
 }
 
-function api(path, options) {
+async function api(path, options) {
   const settings = Object.assign({}, options || {});
   settings.headers = authHeaders(settings.headers);
-  return fetch(path, settings);
+  const response = await fetch(path, settings);
+  if (response.status === 401) {
+    forgetToken();
+    askForToken("That token was refused. Paste a valid one.");
+  }
+  return response;
 }
 
-function streamUrl(path) {
-  return TOKEN ? `${path}?token=${encodeURIComponent(TOKEN)}` : path;
+function askForToken(message) {
+  if ($("gate")) { $("gatemsg").textContent = message; return; }
+  const gate = document.createElement("div");
+  gate.id = "gate";
+  gate.className = "approval";
+  gate.innerHTML = `<div id="gatemsg">${escape(message)}</div>
+                    <input id="gatetoken" type="password" placeholder="API token" />
+                    <button class="ok" id="gatesave">Use this token</button>`;
+  $("log").appendChild(gate);
+  $("gatesave").onclick = () => {
+    const value = $("gatetoken").value.trim();
+    if (!value) return;
+    rememberToken(value);
+    gate.remove();
+    start();
+  };
+  scroll();
+}
+
+async function streamUrl(path) {
+  if (AUTH_MODE !== "required") return path;
+  const response = await api("/api/events/ticket", { method: "POST" });
+  if (!response.ok) return null;
+  const { ticket } = await response.json();
+  return `${path}?ticket=${encodeURIComponent(ticket)}`;
 }
 
 const escape = (s) => String(s ?? "").replace(/[&<>]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
@@ -149,11 +192,32 @@ function scroll() { $("log").scrollTop = $("log").scrollHeight; }
 function addMessage(role, text) {
   const el = document.createElement("div");
   el.className = "msg " + role;
-  el.innerHTML = `<div class="who">${role === "user" ? "You" : "J"}</div>
+  el.innerHTML = `<div class="who">${role === "user" ? "You" : "A"}</div>
                   <div class="bubble">${escape(text)}</div>`;
   $("log").appendChild(el);
   scroll();
   return el.querySelector(".bubble");
+}
+
+function appendDelta(text) {
+  if (!text) return;
+  if (!live) live = { bubble: addMessage("assistant", ""), text: "" };
+  live.text += text;
+  live.bubble.textContent = live.text;
+  scroll();
+}
+
+function discardDelta() {
+  if (!live) return;
+  live.bubble.parentElement.remove();
+  live = null;
+}
+
+function settleDelta(answer) {
+  if (!live) return false;
+  live.bubble.textContent = answer;
+  live = null;
+  return true;
 }
 
 function addTool(callId, name, state, detail) {
@@ -196,16 +260,26 @@ function addApproval(data) {
   el.querySelector(".no").onclick = () => decide(false);
 }
 
-function connect(id) {
+async function connect(id) {
   if (stream) stream.close();
-  stream = new EventSource(streamUrl(`/api/events/${id}`));
+  const url = await streamUrl(`/api/events/${id}`);
+  if (!url) return;
+  stream = new EventSource(url);
+  const opened = stream;
 
   stream.onopen = () => { $("dot").className = "dot live"; $("conn").textContent = "live"; };
-  stream.onerror = () => { $("dot").className = "dot"; $("conn").textContent = "reconnecting"; };
+  stream.onerror = () => {
+    $("dot").className = "dot";
+    $("conn").textContent = "reconnecting";
+    opened.close();
+    if (stream !== opened || sessionId !== id) return;
+    setTimeout(() => { if (sessionId === id) connect(id); }, 2000);
+  };
 
   const on = (type, handler) => stream.addEventListener(type, e => handler(JSON.parse(e.data).data));
 
   on("thinking", d => addTool("thinking", "thinking", "wait", `step ${d.step}`));
+  on("answer_delta", d => appendDelta(d.text));
   on("tool_proposed", d => addTool(d.call_id, d.tool, "wait", "proposed"));
   on("approval_required", d => addApproval(d));
   on("approval_granted", d => addTool(d.call_id, d.tool, "wait", "approved, running"));
@@ -219,8 +293,10 @@ function connect(id) {
       if (d.attempt > 0) addTool("reflection", "reflection", "ok", "answer corrected");
       return;
     }
+    discardDelta();
     const detail = (d.issues || []).map(i => i.kind).join(", ");
-    addTool("reflection", "reflection", "wait", `rechecking: ${detail}`);
+    const source = d.source === "model" ? "model check" : "reflection";
+    addTool("reflection", source, "wait", `rechecking: ${detail}`);
   });
   on("error", d => addMessage("assistant", "Error: " + d.error));
 }
@@ -276,6 +352,7 @@ async function send() {
   $("send").disabled = true;
   $("input").value = "";
   addMessage("user", text);
+  live = null;
 
   try {
     const response = await api("/api/chat", {
@@ -286,9 +363,11 @@ async function send() {
     });
     const data = await response.json();
     if (!response.ok) {
+      discardDelta();
       addMessage("assistant", "Error: " + (data.detail || response.statusText));
     } else {
-      addMessage("assistant", data.answer || "(no answer)");
+      const answer = data.answer || "(no answer)";
+      if (!settleDelta(answer)) addMessage("assistant", answer);
       if (data.stopped_at_limit) addMessage("assistant", "(stopped at the step limit)");
       if (data.critique && !data.critique.passed) {
         const kinds = data.critique.issues.map(i => i.kind).join(", ");
@@ -298,8 +377,10 @@ async function send() {
       loadSessions();
     }
   } catch (error) {
+    discardDelta();
     addMessage("assistant", "Error: " + error.message);
   } finally {
+    live = null;
     busy = false;
     $("send").disabled = false;
     $("input").focus();
@@ -316,8 +397,17 @@ $("input").addEventListener("input", e => {
   e.target.style.height = Math.min(e.target.scrollHeight, 160) + "px";
 });
 
-loadTools();
-loadSessions().then(() => { if (!sessionId) newSession(); });
+async function start() {
+  if (AUTH_MODE === "required" && !storedToken()) {
+    askForToken("This ARTHUR requires a token. Paste the one printed on first run.");
+    return;
+  }
+  await loadTools();
+  await loadSessions();
+  if (!sessionId) newSession();
+}
+
+start();
 </script>
 </body>
 </html>

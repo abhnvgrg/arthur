@@ -25,13 +25,6 @@ def trim_history(
     max_messages: int = MAX_HISTORY_MESSAGES,
     max_characters: int = MAX_HISTORY_CHARACTERS,
 ) -> list[dict[str, Any]]:
-    """Drop the oldest exchanges until the history fits.
-
-    Trimming happens from the front and never splits an assistant message from
-    the tool results that answer it: a `tool` message whose matching
-    `tool_calls` has been dropped is rejected by the API, so an orphan is worse
-    than a shorter history.
-    """
     trimmed = list(messages)
 
     while trimmed and (

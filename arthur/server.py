@@ -64,13 +64,6 @@ class TokenRequest(BaseModel):
 
 
 class ApprovalBroker:
-    """Holds a turn open while a human decides.
-
-    A pending approval is a future keyed by the model's own tool-call id. The
-    HTTP handler resolves it, the turn resumes. A decision that never arrives
-    times out as a denial rather than holding the turn forever.
-    """
-
     def __init__(self, timeout: float = APPROVAL_TIMEOUT_SECONDS) -> None:
         self.timeout = timeout
         self._pending: dict[str, asyncio.Future] = {}

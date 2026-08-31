@@ -303,8 +303,6 @@ from arthur.events import EventBus, EventType
 
 
 class StreamingScriptedLLM(ScriptedLLM):
-    """A scripted model that also delivers its answer a word at a time."""
-
     def __init__(self, script):
         super().__init__(script)
         self.streamed = 0

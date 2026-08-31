@@ -202,7 +202,6 @@ def truncate(value: Any) -> Any:
 
 
 def describe(results: Sequence[ToolResult]) -> str:
-    """The tool record as the critic sees it, with long values cut down."""
     if not results:
         return "No tools were called."
     lines = []
@@ -218,13 +217,6 @@ def describe(results: Sequence[ToolResult]) -> str:
 
 
 def parse_verdict(raw: str | None) -> Critique:
-    """Read the critic's reply, treating anything unreadable as no opinion.
-
-    A critic that cannot be understood must not be able to fail a turn, so
-    every unparseable shape resolves to a pass. The deterministic layer has
-    already run by this point; this one can only add findings, never remove
-    the ones that were earned.
-    """
     parsed, malformed = parse_arguments(raw)
     if malformed or not parsed:
         return Critique(passed=True, source=MODEL)
@@ -257,18 +249,6 @@ class Critic(Protocol):
 
 @dataclass
 class LLMCritic:
-    """A second opinion from a model, for what regular expressions cannot see.
-
-    The pattern layer catches the shape of a dishonest answer: a success verb
-    with no acknowledged failure. It cannot catch an answer that is fluent,
-    contains no trigger word, and is still wrong about what happened. This can,
-    at the cost of one extra completion per turn.
-
-    It runs only when the deterministic layer has already passed, so the cheap
-    check spends nothing and the expensive one is never asked a question that
-    is already answered.
-    """
-
     llm: LLM
 
     async def review(self, answer: str, results: Sequence[ToolResult]) -> Critique:

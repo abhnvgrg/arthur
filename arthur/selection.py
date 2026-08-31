@@ -198,12 +198,6 @@ async def _execute_step(
     emit: Emitter | None,
     max_parallel: int,
 ) -> list[ToolResult]:
-    """Run a step's tool calls, bounded by `max_parallel`.
-
-    Calls that need approval are run one at a time regardless: two approval
-    prompts racing for the same terminal or the same UI would be unreadable,
-    and the user could not tell which one they were answering.
-    """
     needs_approval = [
         call
         for call in calls

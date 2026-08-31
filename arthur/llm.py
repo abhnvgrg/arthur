@@ -34,15 +34,6 @@ def status_of(error: BaseException) -> int | None:
 
 
 def is_transient(error: BaseException) -> bool:
-    """Whether a failed call is worth repeating.
-
-    A status code decides it when there is one: a 400 means the request was
-    wrong and will be wrong again, while a 429 or a 5xx means the request was
-    fine and the moment was not. Transport failures carry no status, so they
-    are recognised by type, and by name for the SDK's own timeout and
-    connection errors, which is what keeps this module free of an import from
-    the provider's package.
-    """
     status = status_of(error)
     if status is not None:
         return status in RETRYABLE_STATUS
@@ -65,15 +56,6 @@ def retry_after_of(error: BaseException) -> float | None:
 
 @dataclass
 class RetryPolicy:
-    """Exponential backoff with full jitter, for transient failures only.
-
-    The server it talks to is the same server every other caller is failing
-    against, so undelayed retries from every client arrive together and extend
-    the outage. Jitter spreads them. A `Retry-After` header, when the provider
-    sends one, wins over the computed delay because it is the only figure that
-    is not a guess.
-    """
-
     attempts: int = 3
     base: float = 0.5
     cap: float = 8.0
@@ -151,14 +133,6 @@ class StreamingLLM(Protocol):
 
 @dataclass
 class Fragments:
-    """Reassembles one streamed tool call from the pieces it arrives in.
-
-    A streamed tool call is not a small object delivered late; it is a name and
-    a JSON string split across many chunks, addressed by position. The id and
-    name usually come once, the arguments accumulate, and neither is safe to
-    read until the stream ends.
-    """
-
     id: str = ""
     name: str = ""
     arguments: str = ""

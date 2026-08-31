@@ -26,7 +26,6 @@ def _default_path() -> Path:
 
 
 def parse_due(value: str | None) -> Optional[str]:
-    """Accept an ISO date or a small set of natural phrases."""
     if not value:
         return None
 

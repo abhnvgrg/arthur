@@ -53,7 +53,6 @@ def hash_token(token: str) -> str:
 
 
 def parse_scopes(raw: Iterable[str]) -> frozenset[Scope]:
-    """Turn stored or requested scope names into scopes, refusing unknown ones."""
     scopes = set()
     for name in raw:
         try:
@@ -65,8 +64,6 @@ def parse_scopes(raw: Iterable[str]) -> frozenset[Scope]:
 
 @dataclass(frozen=True)
 class Principal:
-    """Who a request is from, and what that identity is allowed to do."""
-
     id: str
     name: str
     scopes: frozenset[Scope]
@@ -137,13 +134,6 @@ class TokenRecord:
 
 
 class TokenStore:
-    """Named, scoped, revocable API tokens, stored as hashes.
-
-    Nothing on disk can be replayed as a credential. The plaintext of a token
-    exists once, in the response that mints it; after that only its SHA-256
-    hash is kept, so a leaked config file grants nothing.
-    """
-
     def __init__(self, path: Path | None = None, load: bool = True) -> None:
         self.path = path if path is not None else config_path()
         self._records: dict[str, TokenRecord] = {}
@@ -218,11 +208,6 @@ class TokenStore:
     def adopt(
         self, name: str, secret: str, scopes: Iterable[Scope] | None = None
     ) -> TokenRecord:
-        """Register a token whose plaintext the caller already holds.
-
-        Used to seed a store from a supplied secret without writing to disk,
-        which is how a test or an embedded deployment gets a known credential.
-        """
         record = TokenRecord(
             id=secrets.token_hex(8),
             name=name,
@@ -236,7 +221,6 @@ class TokenStore:
     def issue(
         self, name: str, scopes: Iterable[Scope] | None = None
     ) -> tuple[TokenRecord, str]:
-        """Mint a token and return it alongside its only plaintext."""
         label = name.strip()
         if not label:
             raise ValueError("A token needs a name.")
@@ -277,12 +261,6 @@ class TokenStore:
         return record.principal()
 
     def ensure_owner(self) -> Optional[str]:
-        """Mint the first owner token if this installation has none.
-
-        Returns the plaintext when one was created, and None when a usable
-        credential already exists. This is the only moment the owner token can
-        be read, which is why the server prints it exactly once.
-        """
         if self._environment is not None or self.active_records():
             return None
         _, secret = self.issue(OWNER_NAME, ALL_SCOPES)
@@ -296,15 +274,6 @@ class Ticket:
 
 
 class StreamTickets:
-    """Single-use, short-lived credentials for the event stream.
-
-    `EventSource` cannot set an Authorization header, so the browser has to put
-    something in the URL. A ticket is what goes there instead of the API token:
-    it is redeemed once, expires in seconds, and grants nothing but a stream
-    subscription, so its appearance in a proxy log or browser history is not a
-    disclosure of the caller's real credential.
-    """
-
     def __init__(
         self,
         ttl: float = TICKET_TTL_SECONDS,
@@ -340,12 +309,6 @@ class StreamTickets:
 
 
 class RateLimiter:
-    """A sliding window of request timestamps per caller.
-
-    Keyed by principal rather than by address, so a leaked token cannot be used
-    faster than the limit no matter where it is used from.
-    """
-
     def __init__(
         self,
         limit: int,
@@ -360,7 +323,6 @@ class RateLimiter:
         self._hits: dict[str, Deque[float]] = {}
 
     def check(self, key: str) -> Optional[float]:
-        """Record a request, returning seconds to wait if it exceeds the limit."""
         now = self.clock()
         hits = self._hits.setdefault(key, deque())
         while hits and hits[0] <= now - self.window:
@@ -375,11 +337,6 @@ class RateLimiter:
 
 
 def presented_token(request: Request) -> Optional[str]:
-    """Read the caller's bearer token.
-
-    Only the header is read. Tokens are no longer accepted from the query
-    string; the event stream uses a ticket instead.
-    """
     header = request.headers.get(TOKEN_HEADER, "")
     scheme, _, value = header.partition(" ")
     if scheme.lower() == "bearer" and value.strip():
@@ -396,13 +353,6 @@ def _unauthorized(detail: str) -> HTTPException:
 
 
 class Authenticator:
-    """Turns a request into a principal, and gates routes on scopes.
-
-    Every guarded route declares the scope it needs. A token that can read the
-    audit log cannot approve a destructive call unless it was issued that
-    scope, which is the difference between one shared secret and an identity.
-    """
-
     def __init__(
         self,
         store: TokenStore,

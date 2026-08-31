@@ -28,13 +28,6 @@ def default_workspace() -> Path:
 
 
 class Workspace:
-    """A single directory that file tools may never escape.
-
-    Every path is resolved and checked against the workspace root before it is
-    opened. Resolution happens first so that `..`, an absolute path, or a
-    symlink pointing outside all collapse to something the check can see.
-    """
-
     def __init__(self, root: Path | str | None = None) -> None:
         self.root = Path(root) if root is not None else default_workspace()
         self.root.mkdir(parents=True, exist_ok=True)

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+DRIVE_LETTER = re.compile(r"^[A-Za-z]:")
+ROOTED_PREFIXES = ("\\\\", "//")
 
 MAX_READ_BYTES = 200_000
 MAX_WRITE_BYTES = 200_000
@@ -38,15 +42,21 @@ class Workspace:
             raise WorkspaceError("A path is required")
         if "\x00" in relative:
             raise WorkspaceError("Path contains a null byte")
+        if DRIVE_LETTER.match(relative) or relative.startswith(ROOTED_PREFIXES):
+            raise self._outside(relative)
 
         candidate = (self.root / relative).resolve()
 
         if candidate != self.root and self.root not in candidate.parents:
-            raise WorkspaceError(
-                f"{relative!r} is outside the workspace. "
-                "File tools may only touch the workspace directory."
-            )
+            raise self._outside(relative)
         return candidate
+
+    @staticmethod
+    def _outside(relative: str) -> WorkspaceError:
+        return WorkspaceError(
+            f"{relative!r} is outside the workspace. "
+            "File tools may only touch the workspace directory."
+        )
 
     def relative(self, path: Path) -> str:
         return path.relative_to(self.root).as_posix()

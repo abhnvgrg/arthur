@@ -4,7 +4,10 @@ import json
 import os
 import threading
 import uuid
-from datetime import date, datetime, timedelta, timezone
+import re
+from datetime import date, datetime, time, timedelta, timezone
+from arthur import clock
+from arthur.clock import ClockError
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -25,35 +28,122 @@ def _default_path() -> Path:
     return Path.home() / ".arthur" / "tasks.json"
 
 
+TIME_SUFFIX = re.compile(r"\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*$")
+
+DUE_FORMS = (
+    "Use YYYY-MM-DD, an ISO datetime, 'today', 'tomorrow', 'next week', "
+    "or 'in N days', each optionally followed by a time such as '1pm' or '13:00'."
+)
+
+
+def normalise_spaces(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def local_zone() -> Any:
+    try:
+        return clock.local_zone()
+    except ClockError as error:
+        raise TaskError(str(error)) from error
+
+
+def now_local() -> datetime:
+    return datetime.now(local_zone())
+
+
+def zone_name() -> str:
+    return clock.zone_name()
+
+
+def _render(day: date, moment: time | None) -> str:
+    if moment is None:
+        return day.isoformat()
+    return datetime.combine(day, moment).isoformat(timespec="minutes")
+
+
+def _read_time(match: re.Match[str]) -> time:
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    meridiem = match.group(3)
+
+    if meridiem == "pm" and hour < 12:
+        hour += 12
+    elif meridiem == "am" and hour == 12:
+        hour = 0
+
+    if hour > 23 or minute > 59:
+        raise TaskError(f"{match.group(0).strip()!r} is not a valid time of day")
+    return time(hour, minute)
+
+
+def _split_time(text: str) -> tuple[str, time | None]:
+    match = TIME_SUFFIX.search(text)
+    if not match or not (match.group(2) or match.group(3)):
+        return text, None
+    return text[: match.start()].strip(), _read_time(match)
+
+
 def parse_due(value: str | None) -> Optional[str]:
     if not value:
         return None
 
-    text = value.strip().lower()
-    today = datetime.now(timezone.utc).date()
+    text = normalise_spaces(value)
+    if not text:
+        return None
+
+    lowered = text.lower()
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        pass
+    else:
+        if parsed.tzinfo is not None:
+            here = parsed.astimezone(local_zone())
+            if parsed.utcoffset() != here.utcoffset():
+                raise TaskError(
+                    f"Due dates are stored in local time, but {value!r} carries "
+                    f"an offset that is not local ({zone_name()} is "
+                    f"{here.strftime('%z')} then). Give the time the user said, "
+                    "without a 'Z' or an offset: 'tomorrow 1pm' or "
+                    "'2026-09-03T13:00'."
+                )
+            parsed = parsed.replace(tzinfo=None)
+        timeless = (parsed.hour, parsed.minute, parsed.second) == (0, 0, 0)
+        if timeless and "t" not in lowered:
+            return parsed.date().isoformat()
+        return parsed.replace(tzinfo=None).isoformat(timespec="minutes")
+
+    stem, moment = _split_time(lowered)
+    today = now_local().date()
 
     relative = {
         "today": today,
         "tomorrow": today + timedelta(days=1),
         "next week": today + timedelta(days=7),
     }
-    if text in relative:
-        return relative[text].isoformat()
+    if stem in relative:
+        return _render(relative[stem], moment)
 
-    if text.startswith("in ") and text.endswith(("day", "days")):
+    if stem.startswith("in ") and stem.endswith(("day", "days")):
         try:
-            amount = int(text.split()[1])
+            amount = int(stem.split()[1])
         except (IndexError, ValueError):
             raise TaskError(f"Could not read a number of days from {value!r}")
-        return (today + timedelta(days=amount)).isoformat()
+        return _render(today + timedelta(days=amount), moment)
 
     try:
-        return date.fromisoformat(text).isoformat()
+        day = date.fromisoformat(stem)
     except ValueError:
-        raise TaskError(
-            f"Could not understand the due date {value!r}. "
-            "Use YYYY-MM-DD, 'today', 'tomorrow', 'next week', or 'in N days'."
-        )
+        raise TaskError(f"Could not understand the due date {value!r}. {DUE_FORMS}")
+    return _render(day, moment)
+
+
+def as_datetime(due: str, end_of_day: bool = False) -> datetime:
+    if "T" in due:
+        return datetime.fromisoformat(due)
+    day = date.fromisoformat(due)
+    return datetime.combine(day, time(23, 59, 59) if end_of_day else time(0, 0))
 
 
 class TaskStore:
@@ -91,13 +181,14 @@ class TaskStore:
 
             task = {
                 "id": f"t_{uuid.uuid4().hex[:8]}",
-                "title": title.strip(),
+                "title": normalise_spaces(title),
                 "due": due_date,
                 "priority": priority,
                 "tags": sorted({tag.strip().lower() for tag in (tags or []) if tag.strip()}),
                 "done": False,
                 "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "completed_at": None,
+                "reminded_at": None,
             }
             tasks.append(task)
             self._write(tasks)
@@ -117,9 +208,13 @@ class TaskStore:
             tasks = [task for task in tasks if needle in task.get("tags", [])]
         if due_before:
             cutoff = parse_due(due_before)
-            tasks = [
-                task for task in tasks if task.get("due") and task["due"] <= cutoff
-            ]
+            if cutoff:
+                limit = as_datetime(cutoff, end_of_day=True)
+                tasks = [
+                    task
+                    for task in tasks
+                    if task.get("due") and as_datetime(task["due"]) <= limit
+                ]
 
         rank = {"high": 0, "normal": 1, "low": 2}
         return sorted(
@@ -147,6 +242,17 @@ class TaskStore:
                 return {**task, "already_done": False}
         raise TaskError(f"No task with id {task_id!r}")
 
+    def mark_reminded(self, task_id: str, when: str) -> bool:
+        with self._lock:
+            tasks = self._read()
+            for task in tasks:
+                if task["id"] != task_id:
+                    continue
+                task["reminded_at"] = when
+                self._write(tasks)
+                return True
+        return False
+
     def remove(self, task_id: str) -> bool:
         with self._lock:
             tasks = self._read()
@@ -157,17 +263,29 @@ class TaskStore:
         return True
 
     def overdue(self) -> list[dict[str, Any]]:
-        today = datetime.now(timezone.utc).date().isoformat()
+        now = now_local().replace(tzinfo=None)
         return [
             task
             for task in self.list()
-            if task.get("due") and task["due"] < today
+            if task.get("due") and as_datetime(task["due"], end_of_day=True) < now
         ]
 
 
 class AddTaskArgs(BaseModel):
     title: str = Field(min_length=1, max_length=200)
-    due: str | None = Field(default=None, max_length=40)
+    due: str | None = Field(
+        default=None,
+        max_length=40,
+        description=(
+            "When the task is due, in the user's local timezone. Use a "
+            "phrase ('today', 'tomorrow', 'next week', 'in 3 days'), "
+            "optionally with a time ('tomorrow 1pm', 'in 3 days at "
+            "9:30am'), or 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM'. A 'Z' "
+            "suffix or UTC offset is rejected: a bare time is already "
+            "local. If the user named another timezone, convert it to "
+            "local time yourself before calling this."
+        ),
+    )
     priority: Priority = "normal"
     tags: list[str] = Field(default_factory=list, max_length=10)
 
@@ -175,7 +293,11 @@ class AddTaskArgs(BaseModel):
 class ListTasksArgs(BaseModel):
     include_done: bool = False
     tag: str | None = Field(default=None, max_length=40)
-    due_before: str | None = Field(default=None, max_length=40)
+    due_before: str | None = Field(
+        default=None,
+        max_length=40,
+        description="Latest due date to include, in the same forms as add_task's due.",
+    )
 
 
 class TaskIdArgs(BaseModel):
@@ -196,7 +318,8 @@ def register(registry, store: TaskStore) -> None:
         risk=Risk.WRITES,
     )
     def add_task(args: AddTaskArgs) -> dict[str, Any]:
-        return store.add(args.title, args.due, args.priority, args.tags)
+        task = store.add(args.title, args.due, args.priority, args.tags)
+        return {**task, "timezone": zone_name()}
 
     @registry.tool(
         name="list_tasks",
@@ -206,7 +329,7 @@ def register(registry, store: TaskStore) -> None:
     )
     def list_tasks(args: ListTasksArgs) -> dict[str, Any]:
         tasks = store.list(args.include_done, args.tag, args.due_before)
-        return {"tasks": tasks, "count": len(tasks)}
+        return {"tasks": tasks, "count": len(tasks), "timezone": zone_name()}
 
     @registry.tool(
         name="overdue_tasks",
@@ -216,7 +339,7 @@ def register(registry, store: TaskStore) -> None:
     )
     def overdue_tasks(_: NoArgs) -> dict[str, Any]:
         tasks = store.overdue()
-        return {"tasks": tasks, "count": len(tasks)}
+        return {"tasks": tasks, "count": len(tasks), "timezone": zone_name()}
 
     @registry.tool(
         name="complete_task",

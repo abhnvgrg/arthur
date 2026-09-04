@@ -6,7 +6,12 @@ import pytest
 
 from arthur.dispatch import Outcome
 from arthur.llm import Completion, ScriptedLLM, ToolCall
-from arthur.selection import SYSTEM_PROMPT, build_messages, run_turn
+from arthur.selection import (
+    SYSTEM_PROMPT,
+    build_messages,
+    build_system_prompt,
+    run_turn,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -226,9 +231,26 @@ async def test_history_is_placed_between_system_and_user():
 
     messages = build_messages("new question", history)
 
-    assert messages[0] == {"role": "system", "content": SYSTEM_PROMPT}
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"].startswith(SYSTEM_PROMPT)
     assert messages[1:3] == history
     assert messages[-1] == {"role": "user", "content": "new question"}
+
+
+async def test_the_system_prompt_carries_the_current_local_time(monkeypatch):
+    monkeypatch.setenv("ARTHUR_TIMEZONE", "Asia/Tokyo")
+
+    prompt = build_system_prompt()
+
+    assert prompt.startswith(SYSTEM_PROMPT)
+    assert "The current local time is" in prompt
+    assert "Asia/Tokyo" in prompt
+
+
+async def test_a_caller_can_still_supply_its_own_prompt():
+    messages = build_messages("hi", system_prompt="be terse")
+
+    assert messages[0] == {"role": "system", "content": "be terse"}
 
 
 async def test_the_conversation_is_returned_for_the_next_turn(dispatcher):

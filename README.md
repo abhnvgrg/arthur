@@ -8,7 +8,7 @@ synthesis, and reflection.
 That engine reads. This project is about letting it **act**, safely.
 
 ```
-433 tests passing — no API key, no network, no Docker
+545 tests passing — no API key, no network, no Docker
 ```
 
 ## What it does
@@ -32,6 +32,10 @@ That engine reads. This project is about letting it **act**, safely.
   critic can be switched on for what patterns cannot see.
 - **Survives a bad minute** — model calls retry transient failures with
   jittered backoff, and never retry a request that was simply wrong.
+- **Speaks first** — a reminder loop that watches the task list and reaches
+  you on your phone, your desktop, or by email when something is due.
+- **Listens and answers aloud** - push to talk in the terminal, transcribed
+  by Whisper and spoken back, on the same key as the model.
 
 ## Run it
 
@@ -40,15 +44,26 @@ python -m venv .venv
 .venv/Scripts/pip install -r requirements-dev.txt
 
 .venv/Scripts/python -m arthur serve      # web UI at http://127.0.0.1:8765
+.venv/Scripts/python -m arthur watch      # reminder daemon
+.venv/Scripts/python -m arthur talk       # speak to it, hear it answer
 .venv/Scripts/python -m arthur            # terminal REPL
 ```
+
+`watch` is the only part that speaks first. It polls the task list, and when
+something is due it notifies whichever channels are configured — ntfy, a
+desktop toast, email — and marks the task so it never fires twice. It refuses
+to start with no channel configured, rather than running silently forever.
+
+It deliberately cannot call tools or the model. An unattended loop that could
+reach the tool layer would need an approval path with nobody there to answer,
+so it reads tasks and sends messages, and that is all it can do.
 
 On first run the server prints the owner token **once** — save it, because
 only its hash is kept. Paste it into the web UI when it asks; it is remembered
 in `localStorage` after that. `ARTHUR_API_TOKEN` supplies your own instead and
 is never written to disk.
 
-The web UI needs `OPENAI_API_KEY`. The terminal REPL can drive tools directly
+The web UI needs a model API key. The terminal REPL can drive tools directly
 without one:
 
 ```
@@ -95,6 +110,10 @@ something it just read. So the boundary between "the model suggested this" and
 | `arthur/selection.py` | Tool-selection node and the turn loop |
 | `arthur/reflection.py` | Self-check on the answer, and the retry loop |
 | `arthur/events.py` | Per-session event bus |
+| `arthur/clock.py` | Local timezone and the current moment |
+| `arthur/schedule.py` | The reminder loop: what is due, and when to say so |
+| `arthur/notify.py` | Notification channels: ntfy, toast, email, events |
+| `arthur/voice.py` | Speech in and out, and the microphone |
 | `arthur/session.py` | Conversations, persistence, history trimming |
 | `arthur/server.py` | HTTP API, SSE, approval broker |
 | `arthur/web/index.html` | Web UI, no build step |
@@ -134,13 +153,19 @@ Mutation-checked, not just green:
   heuristic, and what it deliberately does not do
 - [docs/research.md](docs/research.md) — delegating to the Research Assistant,
   and why the tool polls
+- [docs/voice.md](docs/voice.md) - speech in and out, and why approvals
+  are never spoken
+- [docs/schedule.md](docs/schedule.md) — the reminder loop, what it is allowed
+  to do, and why it fires only once
 - [docs/skills.md](docs/skills.md) — the tools, and how to add one
 
 ## Configuration
 
 | Variable | Default |
 |---|---|
-| `OPENAI_API_KEY` | — (required for chat) |
+| `ARTHUR_LLM_API_KEY` | — (required for chat; falls back to `OPENAI_API_KEY`) |
+| `ARTHUR_LLM_BASE_URL` | unset — OpenAI. Any OpenAI-compatible endpoint works |
+| `ARTHUR_LLM_MODEL` | `gpt-4o-mini` |
 | `ARTHUR_API_TOKEN` | unset — an all-scope token, never stored |
 | `ARTHUR_CONFIG_FILE` | `~/.arthur/config.json` |
 | `ARTHUR_HOST` / `ARTHUR_PORT` | `127.0.0.1` / `8765` |
@@ -153,6 +178,21 @@ Mutation-checked, not just green:
 | `ARTHUR_AUDIT_LOG` | `~/.arthur/audit.jsonl` |
 | `ARTHUR_MEMORY_FILE` | `~/.arthur/memory.json` |
 | `ARTHUR_TASKS_FILE` | `~/.arthur/tasks.json` |
+| `ARTHUR_TIMEZONE` | unset — the system timezone |
+| `ARTHUR_STT_MODEL` | `whisper-large-v3-turbo` |
+| `ARTHUR_TTS_MODEL` | `canopylabs/orpheus-v1-english` |
+| `ARTHUR_TTS_VOICE` | `daniel` - also autumn, diana, hannah, austin, troy |
+| `ARTHUR_VOICE_BASE_URL` | unset - falls back to `ARTHUR_LLM_BASE_URL` |
+| `ARTHUR_REMIND_INTERVAL` | `60` seconds between checks |
+| `ARTHUR_REMIND_LEAD` | `600` seconds — how far ahead of a task to warn |
+| `ARTHUR_REMIND_GRACE` | `3600` seconds — how stale a missed task may be |
+| `ARTHUR_REMIND_DAY_AT` | unset — dated tasks with no time are not reminded |
+| `ARTHUR_NTFY_TOPIC` | unset — no push. Use a long random string |
+| `ARTHUR_NTFY_SERVER` | `https://ntfy.sh` |
+| `ARTHUR_TOAST` | unset — set to `1` for desktop toasts (needs `plyer`) |
+| `ARTHUR_SMTP_HOST` / `_PORT` | unset / `465` |
+| `ARTHUR_SMTP_USER` / `_PASSWORD` | — |
+| `ARTHUR_SMTP_TO` / `_FROM` | — |
 | `ARTHUR_WORKSPACE` | `~/.arthur/workspace` |
 | `ARTHUR_RESEARCH_URL` | unset — no research tool without it |
 | `ARTHUR_RESEARCH_TOKEN` | empty |
@@ -166,6 +206,10 @@ second worker would break all three. Answers are not streamed token by token.
 Reflection's default layer is heuristic and English-only, and its optional
 model critic is a model grading a model — untested against a real provider. A
 streamed answer that the self-check then rejects has already been seen; the UI
-withdraws it and streams the rewrite. Only `research` reaches the network,
-and only when configured. Each document's *Known limits* section is specific
-about its own layer.
+withdraws it and streams the rewrite. Only `research` and the reminder
+channels reach the network, and only when configured — an ntfy topic is a
+shared secret on a public server, so a guessable one publishes your task
+titles to anyone who guesses it. Reminders fire only for tasks that carry a
+time of day, and `watch` holds its state in one process, so two copies would
+both notify. Each document's *Known limits* section is specific about its own
+layer.

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol, Sequence
 
 MAX_TOOL_CALLS_PER_STEP = 8
+DEFAULT_MODEL = "gpt-4o-mini"
 
 RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 RETRYABLE_NAMES = frozenset(
@@ -207,12 +208,18 @@ class ScriptedLLM:
 class OpenAILLM:
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
+        model: str | None = None,
         api_key: str | None = None,
+        base_url: str | None = None,
         policy: RetryPolicy | None = None,
     ) -> None:
-        self.model = model
-        self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self.model = model or os.environ.get("ARTHUR_LLM_MODEL", DEFAULT_MODEL)
+        self._api_key = (
+            api_key
+            or os.environ.get("ARTHUR_LLM_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+        )
+        self._base_url = base_url or os.environ.get("ARTHUR_LLM_BASE_URL") or None
         self._client = None
         self.policy = policy or policy_from_environment()
 
@@ -226,8 +233,13 @@ class OpenAILLM:
                 ) from error
 
             if not self._api_key:
-                raise LLMError("OPENAI_API_KEY is not set")
-            self._client = AsyncOpenAI(api_key=self._api_key)
+                raise LLMError(
+                    "No model API key. Set ARTHUR_LLM_API_KEY or OPENAI_API_KEY"
+                )
+            options: dict[str, Any] = {"api_key": self._api_key}
+            if self._base_url:
+                options["base_url"] = self._base_url
+            self._client = AsyncOpenAI(**options)
         return self._client
 
     def _request(

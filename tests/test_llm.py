@@ -105,9 +105,46 @@ async def test_a_missing_api_key_is_a_clean_error(monkeypatch):
     from arthur.llm import OpenAILLM
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ARTHUR_LLM_API_KEY", raising=False)
 
     with pytest.raises(LLMError, match="OPENAI_API_KEY"):
         OpenAILLM()._get_client()
+
+
+async def test_the_base_url_is_only_sent_when_configured(monkeypatch):
+    from arthur.llm import OpenAILLM
+
+    monkeypatch.delenv("ARTHUR_LLM_BASE_URL", raising=False)
+    assert OpenAILLM(api_key="sk-test")._base_url is None
+
+    monkeypatch.setenv("ARTHUR_LLM_BASE_URL", "https://api.groq.com/openai/v1")
+    assert (
+        OpenAILLM(api_key="sk-test")._base_url == "https://api.groq.com/openai/v1"
+    )
+
+
+async def test_an_explicit_key_beats_both_environment_variables(monkeypatch):
+    from arthur.llm import OpenAILLM
+
+    monkeypatch.setenv("ARTHUR_LLM_API_KEY", "from-arthur")
+    monkeypatch.setenv("OPENAI_API_KEY", "from-openai")
+
+    assert OpenAILLM(api_key="explicit")._api_key == "explicit"
+    assert OpenAILLM()._api_key == "from-arthur"
+
+    monkeypatch.delenv("ARTHUR_LLM_API_KEY")
+    assert OpenAILLM()._api_key == "from-openai"
+
+
+async def test_the_model_falls_back_to_the_environment(monkeypatch):
+    from arthur.llm import DEFAULT_MODEL, OpenAILLM
+
+    monkeypatch.delenv("ARTHUR_LLM_MODEL", raising=False)
+    assert OpenAILLM().model == DEFAULT_MODEL
+
+    monkeypatch.setenv("ARTHUR_LLM_MODEL", "llama-3.3-70b-versatile")
+    assert OpenAILLM().model == "llama-3.3-70b-versatile"
+    assert OpenAILLM(model="explicit").model == "explicit"
 
 
 class Response:

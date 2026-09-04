@@ -11,6 +11,7 @@ from arthur.events import Emitter, EventBus, EventType
 from arthur.llm import LLM, Completion, ToolCall
 from arthur.reflection import MAX_REFLECTIONS, Critic, Critique, critique
 from arthur.tools.registry import ToolSpec
+from arthur import clock
 
 MAX_STEPS = 4
 MAX_PARALLEL_TOOLS = 4
@@ -22,8 +23,20 @@ SYSTEM_PROMPT = (
     "Tools marked as writing or irreversible need the user's approval, which may be "
     "refused. If a call is refused or fails, tell the user plainly and do not retry "
     "the same call unchanged.\n"
-    "Never claim an action succeeded unless a tool result says so."
+    "Never claim an action succeeded unless a tool result says so.\n"
+    "Do not ask the user for permission before calling a tool. Approval is "
+    "enforced by the system, not by you; asking first only wastes a turn.\n"
+    "Task times are local. State a timezone for one only when a tool result "
+    "names it, and never assume UTC."
 )
+
+
+def build_system_prompt(base: str = SYSTEM_PROMPT) -> str:
+    return (
+        f"{base}\n"
+        f"The current local time is {clock.describe_now()}."
+    )
+
 
 ApprovalHook = Callable[..., Awaitable[bool] | bool]
 
@@ -67,9 +80,10 @@ class Turn:
 def build_messages(
     user_message: str,
     history: Sequence[dict[str, Any]] | None = None,
-    system_prompt: str = SYSTEM_PROMPT,
+    system_prompt: str | None = None,
 ) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    prompt = system_prompt if system_prompt is not None else build_system_prompt()
+    messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
     messages.extend(history or [])
     messages.append({"role": "user", "content": user_message})
     return messages

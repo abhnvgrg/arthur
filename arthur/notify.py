@@ -18,12 +18,39 @@ class NotifyError(Exception):
 
 
 @dataclass(frozen=True)
+class Action:
+    label: str
+    url: str
+    method: str = "POST"
+    body: str = ""
+    clear: bool = True
+    headers: tuple[tuple[str, str], ...] = ()
+
+    def as_header(self) -> str:
+        parts = [
+            "http",
+            self.label.replace(",", " ").replace(";", " "),
+            self.url,
+            f"method={self.method}",
+            f"clear={'true' if self.clear else 'false'}",
+        ]
+        parts.extend(f"headers.{name}={value}" for name, value in self.headers)
+        if self.body:
+            parts.append(f"body={self.body}")
+        return ", ".join(parts)
+
+
+@dataclass(frozen=True)
 class Notification:
     title: str
     body: str = ""
+    actions: tuple[Action, ...] = ()
+    click: str = ""
 
     def clipped(self) -> "Notification":
-        return Notification(self.title[:MAX_TITLE], self.body[:MAX_BODY])
+        return Notification(
+            self.title[:MAX_TITLE], self.body[:MAX_BODY], self.actions, self.click
+        )
 
 
 class Notifier(Protocol):
@@ -79,6 +106,13 @@ class NtfyNotifier:
         import httpx
 
         headers = {"Title": note.title.encode("ascii", "replace").decode()}
+        if note.actions:
+            headers["Actions"] = "; ".join(
+                action.as_header() for action in note.actions[:3]
+            )
+        if note.click:
+            headers["Click"] = note.click
+
         async with httpx.AsyncClient(
             timeout=self.timeout, transport=self._transport
         ) as client:

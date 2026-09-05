@@ -6,10 +6,12 @@ from arthur.llm import (
     Completion,
     Fragments,
     LLMError,
+    OpenAILLM,
     RetryPolicy,
     ScriptedLLM,
     ToolCall,
     is_transient,
+    is_unknown_model,
     parse_arguments,
     retry_after_of,
 )
@@ -549,3 +551,54 @@ async def test_a_fragment_carrying_only_an_id_leaves_the_rest_alone():
     assert fragments.id == "only-an-id"
     assert fragments.name == ""
     assert fragments.arguments == ""
+
+
+class Missing(Exception):
+    status_code = 404
+
+    def __init__(self):
+        super().__init__(
+            "Error code: 404 - {'error': {'message': 'The model "
+            "`llama-3.3-70b-versatile` does not exist or you do not have access "
+            "to it.', 'code': 'model_not_found'}}"
+        )
+
+
+def test_a_missing_model_is_recognised():
+    assert is_unknown_model(Missing()) is True
+
+
+def test_other_failures_are_not_mistaken_for_a_missing_model():
+    class Gone(Exception):
+        status_code = 404
+
+    class Busy(Exception):
+        status_code = 429
+
+    assert is_unknown_model(Gone("no such session")) is False
+    assert is_unknown_model(Busy("slow down")) is False
+
+
+async def test_a_missing_model_names_itself_and_says_how_to_look():
+    llm = OpenAILLM(model="llama-3.3-70b-versatile", api_key="k", base_url="https://x/v1")
+
+    class Completions:
+        async def create(self, **request):
+            raise Missing()
+
+    class Chat:
+        completions = Completions()
+
+    class Client:
+        chat = Chat()
+
+    llm.policy = RetryPolicy(attempts=1)
+    llm._get_client = lambda: Client()
+
+    with pytest.raises(LLMError) as caught:
+        await llm._send({"model": llm.model, "messages": []})
+
+    message = str(caught.value)
+    assert "llama-3.3-70b-versatile" in message
+    assert "ARTHUR_LLM_MODEL" in message
+    assert "https://x/v1/models" in message

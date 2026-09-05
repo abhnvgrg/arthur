@@ -6,11 +6,13 @@ import shlex
 import sys
 
 from arthur.audit import AuditLog
+from arthur.conversation import heard_stop
 from arthur.dispatch import Dispatcher, Outcome
 from arthur.llm import LLMError, OpenAILLM
+from arthur.recall import Librarian
 from arthur.reflection import critic_from_environment
 from arthur.selection import run_turn
-from arthur.tools.builtins import build_registry
+from arthur.tools.builtins import MemoryStore, build_registry
 from arthur.tools.registry import Risk
 
 RISK_LABEL = {
@@ -204,90 +206,78 @@ def serve() -> int:
     return serve_main()
 
 
-STOP_WORDS = frozenset({"quit", "exit", "stop", "goodbye", "good bye"})
+def build_dispatcher() -> Dispatcher:
+    from arthur.server import default_research_backend
+    from arthur.tools.builtins import full_registry
 
-
-def heard_stop(text: str) -> bool:
-    cleaned = "".join(c for c in text.lower() if c.isalpha() or c.isspace()).strip()
-    return cleaned in STOP_WORDS
+    return Dispatcher(
+        full_registry(research_backend=default_research_backend()), audit=AuditLog()
+    )
 
 
 async def conversation() -> int:
+    from arthur.conversation import Conversation, flag
     from arthur.voice import (
         GroqSpeaker,
         GroqTranscriber,
         Microphone,
         Playback,
-        VoiceError,
-        say,
+        VoiceUnavailable,
+        wake_word,
     )
 
-    audit = AuditLog()
-    from arthur.server import default_research_backend
-
-    dispatcher = Dispatcher(
-        build_registry(research_backend=default_research_backend()), audit=audit
-    )
+    dispatcher = build_dispatcher()
     transcriber = GroqTranscriber()
     speaker = GroqSpeaker()
-    microphone = Microphone()
-    playback = Playback()
+    wake = wake_word()
+    require_wake = flag("ARTHUR_REQUIRE_WAKE", True)
+    barge = flag("ARTHUR_BARGE_IN", False)
 
-    print("arthur talk")
+    llm = OpenAILLM()
+    talker = Conversation(
+        llm,
+        dispatcher,
+        transcriber,
+        speaker,
+        Microphone(),
+        Playback(),
+        wake=wake,
+        require_wake=require_wake,
+        barge_in=barge,
+        speak_approvals=flag("ARTHUR_SPOKEN_APPROVALS", True),
+        typed_irreversible=flag("ARTHUR_TYPED_IRREVERSIBLE", False),
+        critic=critic_from_environment(llm),
+        librarian=Librarian(llm, MemoryStore()),
+    )
+
+    print("arthur talk - always listening")
     print(f"listening: {transcriber.model}")
     print(f"speaking:  {speaker.model} / {speaker.voice}")
-    print("approvals are typed, never spoken")
+    print(f"wake word: {wake!r}" if require_wake else "wake word: off, speak any time")
+    print(f"barge-in:  {'on (use headphones)' if barge else 'off'}")
+    print(f"approvals:  spoken - say {talker.confirm!r} for anything irreversible")
     print("say 'stop', or ctrl-c, to finish\n")
 
-    history: list = []
-
-    while True:
-        try:
-            input("press enter, then speak > ")
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
-
-        try:
-            clip = await asyncio.to_thread(microphone.record_until_quiet)
-        except VoiceError as error:
-            print(f"  {error}")
-            return 1
-
-        if not clip.audio:
-            print("  heard nothing")
-            continue
-
-        try:
-            heard = await transcriber.transcribe(clip)
-        except VoiceError as error:
-            print(f"  {error}")
-            continue
-
-        if not heard:
-            print("  heard nothing")
-            continue
-
-        print(f"  you: {heard}")
-        if heard_stop(heard):
-            return 0
-
-        history, answer = await chat(dispatcher, heard, history)
-        if not answer:
-            continue
-
-        try:
-            await say(speaker, playback, answer)
-        except VoiceError as error:
-            print(f"  could not speak: {error}")
+    try:
+        return await talker.run()
+    except VoiceUnavailable as error:
+        print(f"  {error}")
+        return 1
 
 
 def talk() -> int:
-    return asyncio.run(conversation())
+    try:
+        return asyncio.run(conversation())
+    except KeyboardInterrupt:
+        print()
+        return 0
 
 
-def watch() -> int:
+async def watching() -> int:
+    from arthur.jobs import JobRunner, JobStore
+    from arthur.mailwatch import MailWatcher
     from arthur.schedule import Scheduler
+    from arthur.tools import mail as mail_tools
 
     scheduler = Scheduler()
     channels = [one.name for one in scheduler.notifier.notifiers]
@@ -300,32 +290,100 @@ def watch() -> int:
         print("  ARTHUR_SMTP_HOST + _TO  email")
         return 1
 
+    dispatcher = build_dispatcher()
+    jobs = JobStore()
+    runner = JobRunner(OpenAILLM(), dispatcher, store=jobs, notifier=scheduler.notifier)
+
     print(f"arthur watch - notifying: {', '.join(channels)}")
     print(
-        f"checking every {scheduler.interval:.0f}s, "
+        f"reminders every {scheduler.interval:.0f}s, "
         f"{scheduler.lead / 60:.0f} min before a task is due"
     )
-    print("ctrl-c to stop\n")
+    print(f"jobs: {len(jobs.list(include_disabled=False))} active, "
+          f"checked every {runner.interval:.0f}s")
 
     def announce(reminder) -> None:
         print(f"  reminded: {reminder.title} (due {reminder.due:%H:%M})")
         for failure in scheduler.failures:
             print(f"    channel failed - {failure}")
 
+    def ran(outcome) -> None:
+        marker = "ok" if outcome.ok else "failed"
+        print(f"  job {outcome.job.name}: {marker}")
+        if outcome.error:
+            print(f"    {outcome.error}")
+
+    stop = asyncio.Event()
+    running = [
+        asyncio.create_task(scheduler.run(stop=stop, on_sent=announce)),
+        asyncio.create_task(runner.run(stop=stop, on_run=ran)),
+    ]
+
+    if mail_tools.configured():
+        watcher = MailWatcher(mail_tools.MailBox(), fire=runner.fire)
+        print(f"mail: watching {watcher.mailbox.account.username} "
+              f"every {watcher.interval:.0f}s")
+        running.append(asyncio.create_task(watcher.run(stop=stop)))
+    else:
+        print("mail: not configured (set ARTHUR_IMAP_HOST, _USER, _PASSWORD)")
+
+    print("ctrl-c to stop\n")
+
     try:
-        asyncio.run(scheduler.run(on_sent=announce))
-    except KeyboardInterrupt:
-        print()
+        await asyncio.gather(*running)
+    except asyncio.CancelledError:
+        pass
     return 0
 
 
+def watch() -> int:
+    try:
+        return asyncio.run(watching())
+    except KeyboardInterrupt:
+        print()
+        return 0
+
+
+def show_jobs() -> int:
+    from arthur.jobs import JobStore
+
+    jobs = JobStore().list()
+    if not jobs:
+        print("no jobs scheduled. ask in chat: 'every morning at 8, brief me'")
+        return 0
+
+    print(f"{len(jobs)} job(s):")
+    for job in jobs:
+        state = "" if job.enabled else "  [paused]"
+        print(f"  {job.id}  {job.name:<28} {job.describe():<22} runs={job.runs}{state}")
+        print(f"  {'':<10}  {job.prompt[:90]}")
+    return 0
+
+
+USAGE = """arthur - a personal assistant
+
+  python -m arthur              chat in the terminal
+  python -m arthur talk         always-on voice
+  python -m arthur serve        web UI and API for phone and laptop
+  python -m arthur watch        reminders, scheduled jobs and mail triage
+  python -m arthur jobs         list scheduled jobs
+"""
+
+
 def main() -> int:
-    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+    command = sys.argv[1] if len(sys.argv) > 1 else ""
+
+    if command == "serve":
         return serve()
-    if len(sys.argv) > 1 and sys.argv[1] == "watch":
+    if command == "watch":
         return watch()
-    if len(sys.argv) > 1 and sys.argv[1] == "talk":
+    if command == "talk":
         return talk()
+    if command == "jobs":
+        return show_jobs()
+    if command in {"help", "--help", "-h"}:
+        print(USAGE)
+        return 0
     return asyncio.run(repl())
 
 

@@ -7,6 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from arthur.events import EventBus
+from arthur.jobs import JobStore
+from arthur.notify import FanOut
 from arthur.llm import Completion, ScriptedLLM, ToolCall
 from arthur.security import (
     ALL_SCOPES,
@@ -38,6 +40,8 @@ def make_client(dispatcher, script, tmp_path, broker=None, require_token=False) 
         sessions=SessionStore(tmp_path / "sessions.json"),
         bus=EventBus(),
         broker=broker or ApprovalBroker(timeout=0.5),
+        jobs=JobStore(tmp_path / "jobs.json"),
+        notifier=FanOut([]),
         token="test-token",
         require_token=require_token,
     )
@@ -290,7 +294,15 @@ async def test_resolving_twice_only_counts_once(broker):
 
 
 AUTH = {"Authorization": "Bearer test-token"}
-PUBLIC_PATHS = {"/", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+PUBLIC_PATHS = {
+    "/",
+    "/openapi.json",
+    "/docs",
+    "/docs/oauth2-redirect",
+    "/redoc",
+    "/manifest.json",
+    "/sw.js",
+}
 
 
 def guarded(dispatcher, tmp_path, store=None) -> TestClient:
@@ -300,6 +312,8 @@ def guarded(dispatcher, tmp_path, store=None) -> TestClient:
         sessions=SessionStore(tmp_path / "sessions.json"),
         bus=EventBus(),
         broker=ApprovalBroker(timeout=0.5),
+        jobs=JobStore(tmp_path / "jobs.json"),
+        notifier=FanOut([]),
         token=None if store is not None else "test-token",
         store=store,
         require_token=True,
@@ -630,3 +644,109 @@ async def test_a_local_binding_is_not_flagged(host):
     from arthur.security import binding_is_public
 
     assert binding_is_public(host) is False
+
+
+async def test_jobs_start_empty_and_can_be_scheduled(dispatcher, tmp_path):
+    client = make_client(dispatcher, [], tmp_path)
+
+    assert client.get("/api/jobs").json()["count"] == 0
+
+    created = client.post(
+        "/api/jobs",
+        json={"name": "morning", "prompt": "brief me", "when": "daily at 08:00"},
+    ).json()
+
+    assert created["schedule"] == "daily at 08:00"
+    assert client.get("/api/jobs").json()["count"] == 1
+
+
+async def test_an_unreadable_schedule_is_a_400(dispatcher, tmp_path):
+    client = make_client(dispatcher, [], tmp_path)
+
+    response = client.post(
+        "/api/jobs",
+        json={"name": "x", "prompt": "y", "when": "whenever I feel like it"},
+    )
+
+    assert response.status_code == 400
+    assert "daily at 08:00" in response.json()["detail"]
+
+
+async def test_a_job_can_be_run_on_demand(dispatcher, tmp_path):
+    client = make_client(dispatcher, [Completion(text="Two meetings today.")], tmp_path)
+    created = client.post(
+        "/api/jobs",
+        json={"name": "morning", "prompt": "brief me", "when": "daily at 08:00", "notify": False},
+    ).json()
+
+    body = client.post(f"/api/jobs/{created['id']}/run").json()
+
+    assert body["ok"] is True
+    assert body["answer"] == "Two meetings today."
+
+
+async def test_running_an_unknown_job_is_a_404(dispatcher, tmp_path):
+    client = make_client(dispatcher, [], tmp_path)
+    assert client.post("/api/jobs/j_nope/run").status_code == 404
+
+
+async def test_a_job_can_be_deleted(dispatcher, tmp_path):
+    client = make_client(dispatcher, [], tmp_path)
+    created = client.post(
+        "/api/jobs",
+        json={"name": "morning", "prompt": "brief me", "when": "daily at 08:00"},
+    ).json()
+
+    assert client.delete(f"/api/jobs/{created['id']}").status_code == 200
+    assert client.get("/api/jobs").json()["count"] == 0
+
+
+async def test_a_trigger_runs_only_the_jobs_listening_for_it(dispatcher, tmp_path):
+    client = make_client(dispatcher, [Completion(text="Filed it.")], tmp_path)
+    client.post(
+        "/api/jobs",
+        json={"name": "triage", "prompt": "triage this", "when": "on mail", "notify": False},
+    )
+    client.post(
+        "/api/jobs",
+        json={"name": "morning", "prompt": "brief", "when": "daily at 08:00"},
+    )
+
+    body = client.post("/api/triggers/mail", json={"context": "From: the bank"}).json()
+
+    assert body["ran"] == 1
+    assert body["results"][0]["job"] == "triage"
+
+
+async def test_a_trigger_nobody_listens_for_runs_nothing(dispatcher, tmp_path):
+    client = make_client(dispatcher, [], tmp_path)
+    assert client.post("/api/triggers/webhook", json={}).json()["ran"] == 0
+
+
+async def test_the_manifest_and_worker_are_served_for_the_phone(dispatcher, tmp_path):
+    client = make_client(dispatcher, [], tmp_path)
+
+    manifest = client.get("/manifest.json")
+    worker = client.get("/sw.js")
+
+    assert manifest.json()["short_name"] == "Diana"
+    assert worker.status_code == 200
+    assert "serviceWorker" not in worker.text or "caches" in worker.text
+
+
+async def test_uploading_no_audio_is_a_400(dispatcher, tmp_path):
+    client = make_client(dispatcher, [], tmp_path)
+
+    response = client.post("/api/voice/listen", files={"audio": ("a.webm", b"", "audio/webm")})
+
+    assert response.status_code == 400
+
+
+async def test_the_health_check_counts_jobs(dispatcher, tmp_path):
+    client = make_client(dispatcher, [], tmp_path)
+    client.post(
+        "/api/jobs",
+        json={"name": "morning", "prompt": "brief me", "when": "daily at 08:00"},
+    )
+
+    assert client.get("/api/health").json()["jobs"] == 1

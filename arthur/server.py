@@ -6,8 +6,8 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from arthur.audit import AuditLog
@@ -26,10 +26,13 @@ from arthur.security import (
     binding_is_public,
     parse_scopes,
 )
+from arthur.jobs import JobError, JobRunner, JobStore
+from arthur.notify import Action, Notification, build_notifier
+from arthur.recall import Librarian
 from arthur.reflection import Critic, critic_from_environment
 from arthur.selection import MAX_STEPS, Turn, run_turn
 from arthur.session import SessionStore
-from arthur.tools.builtins import build_registry
+from arthur.tools.builtins import MemoryStore, full_registry
 from arthur.tools.research import HttpResearchBackend
 from arthur.tools.registry import Risk, ToolSpec
 
@@ -58,19 +61,71 @@ class ApprovalRequest(BaseModel):
     approved: bool
 
 
+class JobRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    prompt: str = Field(min_length=1, max_length=1000)
+    when: str = Field(min_length=1, max_length=60)
+    speak: bool = False
+    notify: bool = True
+
+
+class TriggerRequest(BaseModel):
+    context: str = Field(default="", max_length=4000)
+
+
+class SpeakRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+
+
 class TokenRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     scopes: list[str] = Field(default_factory=lambda: sorted(s.value for s in ALL_SCOPES))
 
 
 class ApprovalBroker:
-    def __init__(self, timeout: float = APPROVAL_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self, timeout: float = APPROVAL_TIMEOUT_SECONDS, notifier: Any = None
+    ) -> None:
         self.timeout = timeout
+        self.notifier = notifier
         self._pending: dict[str, asyncio.Future] = {}
         self._details: dict[str, dict[str, Any]] = {}
 
     def pending(self) -> list[dict[str, Any]]:
         return list(self._details.values())
+
+    async def _push(self, detail: dict[str, Any]) -> None:
+        if self.notifier is None or not getattr(self.notifier, "notifiers", None):
+            return
+
+        base = os.getenv("ARTHUR_PUBLIC_URL", "").strip().rstrip("/")
+        if not base:
+            return
+
+        token = os.getenv("ARTHUR_APPROVE_TOKEN", "").strip()
+        headers = (("Authorization", f"Bearer {token}"),) if token else ()
+        url = f"{base}/api/approvals"
+
+        await self.notifier.send(
+            Notification(
+                title=f"Approve {detail['tool']}?",
+                body=f"{detail['risk_label']}: {json.dumps(detail['arguments'], default=str)[:400]}",
+                actions=(
+                    Action(
+                        "Approve",
+                        url,
+                        body=json.dumps({"call_id": detail["call_id"], "approved": True}),
+                        headers=headers,
+                    ),
+                    Action(
+                        "Deny",
+                        url,
+                        body=json.dumps({"call_id": detail["call_id"], "approved": False}),
+                        headers=headers,
+                    ),
+                ),
+            ).clipped()
+        )
 
     async def request(
         self, call_id: str, spec: ToolSpec, arguments: dict[str, Any]
@@ -86,6 +141,12 @@ class ApprovalBroker:
             "description": spec.description,
             "arguments": arguments,
         }
+
+        try:
+            await self._push(self._details[call_id])
+        except Exception:
+            pass
+
         try:
             return await asyncio.wait_for(future, timeout=self.timeout)
         except asyncio.TimeoutError:
@@ -107,6 +168,13 @@ class ApprovalBroker:
             if self.resolve(call_id, False):
                 denied += 1
         return denied
+
+
+def sessions_path() -> Path:
+    configured = os.getenv("ARTHUR_SESSIONS_FILE")
+    if configured:
+        return Path(configured)
+    return Path.home() / ".arthur" / "sessions.json"
 
 
 def default_research_backend() -> HttpResearchBackend | None:
@@ -132,6 +200,8 @@ def create_app(
     token: str | None = None,
     store: TokenStore | None = None,
     critic: Critic | None = None,
+    jobs: JobStore | None = None,
+    notifier: Any = None,
     require_token: bool = True,
 ) -> FastAPI:
     tokens = store if store is not None else build_store(token)
@@ -154,12 +224,21 @@ def create_app(
 
     app.state.llm = llm or OpenAILLM()
     app.state.dispatcher = dispatcher or Dispatcher(
-        build_registry(research_backend=default_research_backend()), audit=AuditLog()
+        full_registry(research_backend=default_research_backend()), audit=AuditLog()
     )
-    app.state.sessions = sessions or SessionStore()
+    app.state.sessions = sessions or SessionStore(sessions_path())
     app.state.bus = bus or EventBus()
-    app.state.broker = broker or ApprovalBroker()
+    app.state.notifier = notifier if notifier is not None else build_notifier()
+    app.state.broker = broker or ApprovalBroker(notifier=app.state.notifier)
     app.state.critic = critic or critic_from_environment(app.state.llm)
+    app.state.jobs = jobs if jobs is not None else JobStore()
+    app.state.librarian = Librarian(app.state.llm, MemoryStore())
+    app.state.runner = JobRunner(
+        app.state.llm,
+        app.state.dispatcher,
+        store=app.state.jobs,
+        notifier=app.state.notifier,
+    )
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
@@ -326,6 +405,11 @@ def create_app(
         session.record_turn(turn.messages, tool_calls=len(turn.tool_results))
         app.state.sessions.save(session)
 
+        try:
+            await app.state.librarian.absorb(turn.messages)
+        except Exception:
+            pass
+
         return {
             **turn.to_dict(),
             "session_id": session.id,
@@ -340,12 +424,103 @@ def create_app(
             "entries": entries[-limit:],
         }
 
+    @app.get("/api/jobs", dependencies=[read])
+    async def list_jobs() -> dict[str, Any]:
+        jobs = app.state.jobs.list()
+        return {
+            "count": len(jobs),
+            "jobs": [{**job.to_dict(), "schedule": job.describe()} for job in jobs],
+        }
+
+    @app.post("/api/jobs", dependencies=[chat_scope])
+    async def create_job(request: JobRequest) -> dict[str, Any]:
+        try:
+            job = app.state.jobs.add(
+                request.name, request.prompt, request.when, request.speak, request.notify
+            )
+        except JobError as error:
+            raise HTTPException(400, str(error)) from error
+        return {**job.to_dict(), "schedule": job.describe()}
+
+    @app.post("/api/jobs/{job_id}/run", dependencies=[chat_scope])
+    async def run_job(job_id: str) -> dict[str, Any]:
+        job = app.state.jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "No such job")
+        outcome = await app.state.runner.run_job(job)
+        return {"job_id": job_id, "ok": outcome.ok, "answer": outcome.answer, "error": outcome.error}
+
+    @app.delete("/api/jobs/{job_id}", dependencies=[approve_scope])
+    async def delete_job(job_id: str) -> dict[str, Any]:
+        if not app.state.jobs.remove(job_id):
+            raise HTTPException(404, "No such job")
+        return {"deleted": job_id}
+
+    @app.post("/api/triggers/{event}", dependencies=[chat_scope])
+    async def fire_trigger(event: str, request: TriggerRequest) -> dict[str, Any]:
+        runs = await app.state.runner.fire(event, request.context)
+        return {
+            "event": event,
+            "ran": len(runs),
+            "results": [
+                {"job": run.job.name, "ok": run.ok, "answer": run.answer, "error": run.error}
+                for run in runs
+            ],
+        }
+
+    @app.post("/api/voice/listen", dependencies=[chat_scope])
+    async def voice_listen(audio: UploadFile = File(...)) -> dict[str, Any]:
+        from arthur.voice import GroqTranscriber, VoiceError
+
+        payload = await audio.read()
+        if not payload:
+            raise HTTPException(400, "No audio was uploaded")
+
+        try:
+            heard = await GroqTranscriber().transcribe_file(
+                payload,
+                audio.filename or "speech.webm",
+                audio.content_type or "application/octet-stream",
+            )
+        except VoiceError as error:
+            raise HTTPException(503, str(error)) from error
+        return {"text": heard}
+
+    @app.post("/api/voice/speak", dependencies=[chat_scope])
+    async def voice_speak(request: SpeakRequest) -> Response:
+        from arthur.voice import GroqSpeaker, VoiceError, spoken_form
+
+        try:
+            clip = await GroqSpeaker().speak(spoken_form(request.text))
+        except VoiceError as error:
+            raise HTTPException(503, str(error)) from error
+        return Response(content=clip.as_wav(), media_type="audio/wav")
+
+    @app.get("/manifest.json")
+    async def manifest() -> Response:
+        page = WEB_ROOT / "manifest.json"
+        if not page.exists():
+            raise HTTPException(404, "No manifest is installed")
+        return Response(content=page.read_text(encoding="utf-8"), media_type="application/json")
+
+    @app.get("/sw.js")
+    async def service_worker() -> Response:
+        page = WEB_ROOT / "sw.js"
+        if not page.exists():
+            raise HTTPException(404, "No service worker is installed")
+        return Response(
+            content=page.read_text(encoding="utf-8"),
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-cache"},
+        )
+
     @app.get("/api/health", dependencies=[read])
     async def health() -> dict[str, Any]:
         return {
             "status": "ok",
             "tools": len(app.state.dispatcher.registry),
             "sessions": len(app.state.sessions),
+            "jobs": len(app.state.jobs.list()),
         }
 
     return app

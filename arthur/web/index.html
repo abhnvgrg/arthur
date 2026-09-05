@@ -2,7 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0b0d10" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="Diana" />
+<link rel="manifest" href="/manifest.json" />
 <title>ARTHUR</title>
 <style>
   :root {
@@ -108,10 +113,12 @@
   <header>
     <h2 id="title">New conversation</h2>
     <label class="muted"><input type="checkbox" id="risky" checked /> offer risky tools</label>
+    <label class="muted"><input type="checkbox" id="voice" /> speak replies</label>
   </header>
   <div class="scroll" id="log"></div>
   <div class="composer">
     <textarea id="input" placeholder="Ask something, or tell me to do something..." rows="1"></textarea>
+    <button id="mic" title="Hold to talk">Talk</button>
     <button class="primary" id="send">Send</button>
   </div>
 </main>
@@ -368,6 +375,7 @@ async function send() {
     } else {
       const answer = data.answer || "(no answer)";
       if (!settleDelta(answer)) addMessage("assistant", answer);
+      speak(data.answer);
       if (data.stopped_at_limit) addMessage("assistant", "(stopped at the step limit)");
       if (data.critique && !data.critique.passed) {
         const kinds = data.critique.issues.map(i => i.kind).join(", ");
@@ -405,6 +413,85 @@ async function start() {
   await loadTools();
   await loadSessions();
   if (!sessionId) newSession();
+}
+
+
+let recorder = null;
+let chunks = [];
+let listening = false;
+
+function micLabel(text, active) {
+  const button = $("mic");
+  button.textContent = text;
+  button.classList.toggle("primary", Boolean(active));
+}
+
+async function speak(text) {
+  if (!text || !$("voice").checked) return;
+  try {
+    const response = await api("/api/voice/speak", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text })
+    });
+    if (!response.ok) return;
+    const audio = new Audio(URL.createObjectURL(await response.blob()));
+    await audio.play();
+  } catch (error) {
+    /* speaking is optional - never block the reply on it */
+  }
+}
+
+async function startListening() {
+  if (listening) return;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (error) {
+    micLabel("No mic", false);
+    return;
+  }
+
+  chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = e => chunks.push(e.data);
+  recorder.onstop = async () => {
+    stream.getTracks().forEach(track => track.stop());
+    micLabel("Hearing...", true);
+    const form = new FormData();
+    form.append("audio", new Blob(chunks, { type: recorder.mimeType }), "speech.webm");
+    try {
+      const response = await api("/api/voice/listen", { method: "POST", body: form });
+      const data = await response.json();
+      micLabel("Talk", false);
+      if (response.ok && data.text) {
+        $("input").value = data.text;
+        await send();
+      }
+    } catch (error) {
+      micLabel("Talk", false);
+    }
+  };
+
+  recorder.start();
+  listening = true;
+  micLabel("Listening", true);
+}
+
+function stopListening() {
+  if (!listening) return;
+  listening = false;
+  if (recorder && recorder.state !== "inactive") recorder.stop();
+}
+
+$("mic").onpointerdown = e => { e.preventDefault(); startListening(); };
+$("mic").onpointerup = e => { e.preventDefault(); stopListening(); };
+$("mic").onpointercancel = stopListening;
+$("mic").onpointerleave = stopListening;
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  });
 }
 
 start();

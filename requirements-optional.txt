@@ -1,0 +1,4 @@
+sounddevice>=0.4.6
+plyer>=2.1
+psutil>=5.9
+pillow>=10.0

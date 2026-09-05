@@ -31,11 +31,18 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_system_prompt(base: str = SYSTEM_PROMPT) -> str:
-    return (
-        f"{base}\n"
-        f"The current local time is {clock.describe_now()}."
-    )
+def build_system_prompt(base: str = SYSTEM_PROMPT, memories: str | None = None) -> str:
+    prompt = f"{base}\nThe current local time is {clock.describe_now()}."
+
+    if memories is None:
+        from arthur import recall
+
+        try:
+            memories = recall.recall_block()
+        except OSError:
+            memories = ""
+
+    return f"{prompt}\n\n{memories}" if memories else prompt
 
 
 ApprovalHook = Callable[..., Awaitable[bool] | bool]

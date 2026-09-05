@@ -8,16 +8,17 @@ synthesis, and reflection.
 That engine reads. This project is about letting it **act**, safely.
 
 ```
-545 tests passing — no API key, no network, no Docker
+686 tests passing — no API key, no network, no Docker
 ```
 
 ## What it does
 
 - **Chats and acts** — a tool-calling loop that plans, calls tools, reads the
   results, and answers.
-- **19 tools** — memory, tasks, sandboxed file access, unit conversion, time,
-  a calculator that does not use `eval`, and `research`, which delegates to the
-  Research Assistant's retrieval graph.
+- **36 tools** — memory, tasks, sandboxed file access, unit conversion, time,
+  a calculator that does not use `eval`, mail, Windows control, her own
+  scheduler, and `research`, which delegates to the Research Assistant's
+  retrieval graph.
 - **Asks before it acts** — anything that writes or destroys waits for your
   approval, in the terminal or in the browser.
 - **Shows its work** — live events for every step, tool call, and decision,
@@ -34,8 +35,17 @@ That engine reads. This project is about letting it **act**, safely.
   jittered backoff, and never retry a request that was simply wrong.
 - **Speaks first** — a reminder loop that watches the task list and reaches
   you on your phone, your desktop, or by email when something is due.
-- **Listens and answers aloud** - push to talk in the terminal, transcribed
-  by Whisper and spoken back, on the same key as the model.
+- **Listens and answers aloud** - always on, woken by name, transcribed by
+  Whisper and spoken back sentence by sentence as the answer is written.
+  Writing actions are confirmed by voice; irreversible ones are always typed.
+- **Acts unprompted** - scheduled jobs and event triggers run a full turn on
+  their own and push the result to you. She schedules her own, when asked.
+- **Reads your mail** - IMAP search, triage and drafting. Sending is
+  irreversible and always gated.
+- **Follows you between devices** - one hub, reached from the phone as an
+  installable app with its own scoped token.
+- **Remembers you** - lasting facts are pulled out of conversation and fed
+  back into every later one.
 
 ## Run it
 
@@ -44,19 +54,25 @@ python -m venv .venv
 .venv/Scripts/pip install -r requirements-dev.txt
 
 .venv/Scripts/python -m arthur serve      # web UI at http://127.0.0.1:8765
-.venv/Scripts/python -m arthur watch      # reminder daemon
+.venv/Scripts/python -m arthur watch      # reminders, jobs and mail triage
 .venv/Scripts/python -m arthur talk       # speak to it, hear it answer
 .venv/Scripts/python -m arthur            # terminal REPL
+.venv/Scripts/python -m arthur jobs       # what is scheduled
 ```
 
-`watch` is the only part that speaks first. It polls the task list, and when
+Setting up voice, the phone, mail and automation is in
+**[SETUP.md](SETUP.md)** — the keys and accounts are yours to create.
+
+`watch` is the part that speaks first. It polls the task list, and when
 something is due it notifies whichever channels are configured — ntfy, a
 desktop toast, email — and marks the task so it never fires twice. It refuses
 to start with no channel configured, rather than running silently forever.
 
-It deliberately cannot call tools or the model. An unattended loop that could
-reach the tool layer would need an approval path with nobody there to answer,
-so it reads tasks and sends messages, and that is all it can do.
+It also runs scheduled jobs and mail triage, and those do call the model and
+the tool layer. What they cannot do is approve anything: an unattended job
+that reaches for a writing or irreversible tool is refused, because there is
+nobody there to answer for it. Jobs read, summarise, draft and notify. They
+do not send, delete, or overwrite.
 
 On first run the server prints the owner token **once** — save it, because
 only its hash is kept. Paste it into the web UI when it asks; it is remembered

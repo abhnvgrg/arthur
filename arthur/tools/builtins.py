@@ -202,6 +202,11 @@ def build_registry(
     include_files: bool = True,
     include_convert: bool = True,
     research_backend: Any = None,
+    jobs: Any = None,
+    include_jobs: bool = False,
+    include_system: bool = False,
+    mailbox: Any = None,
+    include_mail: bool = False,
 ) -> ToolRegistry:
     store = memory or MemoryStore()
     registry = ToolRegistry()
@@ -292,4 +297,34 @@ def build_registry(
 
         research_tools.register(registry, research_backend)
 
+    if include_jobs:
+        from arthur.jobs import JobStore
+        from arthur.tools import scheduling as scheduling_tools
+
+        scheduling_tools.register(registry, jobs or JobStore())
+
+    if include_system:
+        from arthur.tools import system as system_tools
+
+        system_tools.register(registry)
+
+    if include_mail:
+        from arthur.tools import mail as mail_tools
+
+        box = mailbox
+        if box is None:
+            box = mail_tools.MailBox() if mail_tools.configured() else None
+        if box is not None:
+            mail_tools.register(registry, box)
+
     return registry
+
+
+def full_registry(**overrides: Any) -> ToolRegistry:
+    settings: dict[str, Any] = {
+        "include_jobs": True,
+        "include_system": True,
+        "include_mail": True,
+    }
+    settings.update(overrides)
+    return build_registry(**settings)

@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable, Protocol, Sequence
 
 MAX_TOOL_CALLS_PER_STEP = 8
 DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 RETRYABLE_NAMES = frozenset(
@@ -32,6 +33,13 @@ def status_of(error: BaseException) -> int | None:
         response = getattr(error, "response", None)
         status = getattr(response, "status_code", None)
     return status if isinstance(status, int) else None
+
+
+def is_unknown_model(error: BaseException) -> bool:
+    if status_of(error) != 404:
+        return False
+    text = str(error).lower()
+    return "model" in text and ("not exist" in text or "not_found" in text)
 
 
 def is_transient(error: BaseException) -> bool:
@@ -262,6 +270,14 @@ class OpenAILLM:
         except LLMError:
             raise
         except Exception as error:
+            if is_unknown_model(error):
+                raise LLMError(
+                    f"The model {self.model!r} is not available on this key. "
+                    "Set ARTHUR_LLM_MODEL to one your account can reach - list "
+                    "them with: curl "
+                    f"{self._base_url or DEFAULT_BASE_URL}/models "
+                    '-H "Authorization: Bearer $ARTHUR_LLM_API_KEY"'
+                ) from error
             raise LLMError(f"The model call failed: {error}") from error
 
     async def complete(
